@@ -198,7 +198,7 @@ final class Lexicon {
       return lookup(target, tag: nil, stress: -0.5, ctx: ctx)
     } else if let sym = Lexicon.symbolSet[word] {
       return lookup(sym, tag: nil, stress: nil, ctx: ctx)
-    } else if word.trimmingCharacters(in: CharacterSet(charactersIn: ".")).contains(".") {
+    } else if word.trimmingCharacters(in: CharacterSet(charactersIn: ".")).contains("."), !word.contains(where: { $0.isNumber }) {
       let parts = word.split(separator: ".")
       if parts.map({ $0.count }).max() ?? 0 < 3 {
         return getNNP(word)
