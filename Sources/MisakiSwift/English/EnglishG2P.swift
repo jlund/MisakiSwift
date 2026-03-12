@@ -351,7 +351,7 @@ final public class EnglishG2P {
         } else if token.tag == .dash || (token.tag == .punctuation && token.text == "–") {
           token.phonemes = "—"
           token.`_`.rating = 3
-        } else if let tag = token.tag, EnglishG2P.punctuationTags.contains(tag), !token.text.lowercased().unicodeScalars.allSatisfy({ (97...122).contains(Int($0.value)) }) {
+        } else if let tag = token.tag, EnglishG2P.punctuationTags.contains(tag), !token.text.lowercased().unicodeScalars.allSatisfy({ (97...122).contains(Int($0.value)) }), Lexicon.symbolSet[token.text] == nil {
           if let val = EnglishG2P.punctuationTagPhonemes[token.text] {
             token.phonemes = val
           } else {
