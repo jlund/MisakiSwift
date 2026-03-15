@@ -466,7 +466,7 @@ final class Lexicon {
         splits = num.split(whereSeparator: { !$0.isLetter }).map(String.init)
       } else {
         if let val = Decimal(string: num) {
-          splits = num2Words.convert(val).split(separator: " ").map(String.init)
+          splits = num2Words.convert(val).split(whereSeparator: { !$0.isLetter }).map(String.init)
         } else {
           splits = num.split(whereSeparator: { !$0.isLetter }).map(String.init)
         }
