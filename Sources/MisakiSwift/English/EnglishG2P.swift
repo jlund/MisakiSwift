@@ -359,7 +359,11 @@ final public class EnglishG2P {
           }
           token.`_`.rating = 4
         } else if currency != nil {
-          if token.tag != .number {
+          // NLTagger tags decimal amounts (e.g. "5.72" from "$5.72") as .otherWord
+          // instead of .number. Accept tokens that look numeric regardless of tag.
+          let looksNumeric = token.text.contains(where: { $0.isNumber }) &&
+            token.text.allSatisfy({ $0.isNumber || $0 == "," || $0 == "." })
+          if token.tag != .number && !looksNumeric {
             currency = nil
           } else if j + 1 == subtokens.count && (i + 1 == tokens.count || tokens[i + 1].tag != .number) {
             token.`_`.currency = currency
