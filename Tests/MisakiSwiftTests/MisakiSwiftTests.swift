@@ -72,3 +72,18 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   #expect(result.contains("dˈɑləɹz"))  // "dollars" phoneme
   #expect(result.contains("sˈɛnts"))   // "cents" phoneme
 }
+
+// Intra-word hyphens should not produce an em-dash pause
+@Test func testIntraWordHyphen_NoPause() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "Enthusiasm was at an all-time high.")
+  // The phoneme string must NOT contain "—" between "all" and "time"
+  #expect(!result.contains("—"))
+}
+
+@Test func testInterWordDash_StillPauses() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "Hello — world.")
+  // A spaced em-dash should still produce a pause
+  #expect(result.contains("—"))
+}
