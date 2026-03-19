@@ -349,7 +349,12 @@ final public class EnglishG2P {
           token.phonemes = ""
           token.`_`.rating = 4
         } else if token.tag == .dash || (token.tag == .punctuation && token.text == "–") {
-          token.phonemes = "—"
+          // Silence intra-word hyphens (e.g. "all-time") to prevent the
+          // TTS engine from inserting an unnatural pause between the parts
+          // of a compound word.  An intra-word hyphen is a plain "-" whose
+          // preceding token has no trailing whitespace.
+          let isIntraWordHyphen = token.text == "-" && i > 0 && tokens[i - 1].whitespace.isEmpty
+          token.phonemes = isIntraWordHyphen ? "" : "—"
           token.`_`.rating = 3
         } else if let tag = token.tag, EnglishG2P.punctuationTags.contains(tag), !token.text.lowercased().unicodeScalars.allSatisfy({ (97...122).contains(Int($0.value)) }), Lexicon.symbolSet[token.text] == nil {
           if let val = EnglishG2P.punctuationTagPhonemes[token.text] {
