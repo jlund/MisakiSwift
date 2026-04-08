@@ -30,6 +30,39 @@ final public class EnglishG2P {
   // Splits words into subtokens such as acronym boundaries, signs, commas, decimals, multiple quotes, camelCase boundaries and so forth.
   static let subtokenizeRegexPattern = #"^[''']+|\p{Lu}(?=\p{Lu}\p{Ll})|(?:^-)?(?:\d?[,.]?\d)+|[-_]+|[''']{2,}|\p{L}*?(?:[''']\p{L})*?\p{Ll}(?=\p{Lu})|\p{L}+(?:[''']\p{L})*|[^-_\p{L}'''\d]|[''']+$"#
   static let subtokenizeRegex = try! NSRegularExpression(pattern: EnglishG2P.subtokenizeRegexPattern, options: [])
+
+  // Regexes used to expand temperature measurements like "110°F" into spoken
+  // form ("110 degrees Fahrenheit") before tokenization. The degree sign is
+  // tagged as .otherWord by NLTagger and otherwise leaks into the fallback
+  // network, producing garbled audio.
+  //
+  // Singular variants match exactly "1°" (not "11°", "21°", "0.1°", etc.) so
+  // that "1°F" becomes "1 degree Fahrenheit" rather than "1 degrees Fahrenheit".
+  private static let temperatureSingularFahrenheitRegex = try! NSRegularExpression(pattern: #"(?<![\d.])1°[Ff]\b"#, options: [])
+  private static let temperatureSingularCelsiusRegex = try! NSRegularExpression(pattern: #"(?<![\d.])1°[Cc]\b"#, options: [])
+  private static let temperatureSingularBareDegreeRegex = try! NSRegularExpression(pattern: #"(?<![\d.])1°"#, options: [])
+  private static let temperatureFahrenheitRegex = try! NSRegularExpression(pattern: #"(\d)°[Ff]\b"#, options: [])
+  private static let temperatureCelsiusRegex = try! NSRegularExpression(pattern: #"(\d)°[Cc]\b"#, options: [])
+  private static let temperatureBareDegreeRegex = try! NSRegularExpression(pattern: #"(\d)°"#, options: [])
+
+  static func normalizeTemperatures(_ text: String) -> String {
+    var result = text
+    // Singular forms must run before the plural forms so that "1°F" matches
+    // the singular pattern before the more permissive plural pattern can.
+    let replacements: [(NSRegularExpression, String)] = [
+      (temperatureSingularFahrenheitRegex, "1 degree Fahrenheit"),
+      (temperatureSingularCelsiusRegex, "1 degree Celsius"),
+      (temperatureSingularBareDegreeRegex, "1 degree"),
+      (temperatureFahrenheitRegex, "$1 degrees Fahrenheit"),
+      (temperatureCelsiusRegex, "$1 degrees Celsius"),
+      (temperatureBareDegreeRegex, "$1 degrees"),
+    ]
+    for (regex, template) in replacements {
+      let range = NSRange(result.startIndex..., in: result)
+      result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: template)
+    }
+    return result
+  }
   
   struct PreprocessFeature {
     enum Value {
@@ -144,7 +177,9 @@ final public class EnglishG2P {
     var tokens: [String] = []
     var features: [PreprocessFeature] = []
 
-    let input = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Expand temperature measurements (e.g. "110°F") into spoken form before
+    // tokenization, so the degree symbol does not derail the phonemizer.
+    let input = EnglishG2P.normalizeTemperatures(text.trimmingCharacters(in: .whitespacesAndNewlines))
     var lastEnd = input.startIndex
     let ns = input as NSString
     let fullRange = NSRange(location: 0, length: ns.length)

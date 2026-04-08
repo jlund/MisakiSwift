@@ -73,6 +73,60 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   #expect(result.contains("sˈɛnts"))   // "cents" phoneme
 }
 
+// Temperature measurements (e.g. "110°F") should be expanded into spoken form
+// before tokenization rather than being passed through to the fallback network.
+@Test func testTemperature_Fahrenheit() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "The temperature was 110°F today.")
+  #expect(result.contains("dəɡɹˈi"))   // "degree(s)" phoneme stem
+  #expect(result.contains("fˈɛɹənhˌIt")) // "Fahrenheit" phoneme
+}
+
+@Test func testTemperature_Celsius() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "Water boils at 100°C.")
+  #expect(result.contains("dəɡɹˈi"))   // "degree(s)" phoneme stem
+  #expect(result.contains("sˈɛlsiəs")) // "Celsius" phoneme
+}
+
+@Test func testTemperature_BareDegree() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "The angle is 45° from vertical.")
+  #expect(result.contains("dəɡɹˈi"))   // "degree(s)" phoneme stem
+}
+
+@Test func testTemperature_DecimalFahrenheit() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "Normal body temperature is 98.6°F.")
+  #expect(result.contains("dəɡɹˈi"))
+  #expect(result.contains("fˈɛɹənhˌIt"))
+}
+
+@Test func testTemperature_NormalizationHelper() async throws {
+  #expect(EnglishG2P.normalizeTemperatures("110°F") == "110 degrees Fahrenheit")
+  #expect(EnglishG2P.normalizeTemperatures("30°C") == "30 degrees Celsius")
+  #expect(EnglishG2P.normalizeTemperatures("45°") == "45 degrees")
+  #expect(EnglishG2P.normalizeTemperatures("from 60°F to 80°F") == "from 60 degrees Fahrenheit to 80 degrees Fahrenheit")
+  #expect(EnglishG2P.normalizeTemperatures("98.6°F") == "98.6 degrees Fahrenheit")
+  // Singular: only an isolated "1" takes the singular form.
+  #expect(EnglishG2P.normalizeTemperatures("1°F") == "1 degree Fahrenheit")
+  #expect(EnglishG2P.normalizeTemperatures("1°C") == "1 degree Celsius")
+  #expect(EnglishG2P.normalizeTemperatures("1°") == "1 degree")
+  // Plural still applies for 11, 21, 0.1, etc.
+  #expect(EnglishG2P.normalizeTemperatures("11°F") == "11 degrees Fahrenheit")
+  #expect(EnglishG2P.normalizeTemperatures("21°C") == "21 degrees Celsius")
+  #expect(EnglishG2P.normalizeTemperatures("0.1°F") == "0.1 degrees Fahrenheit")
+}
+
+@Test func testTemperature_SingularFahrenheit() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "It dropped to 1°F overnight.")
+  // Singular "degree" lacks the plural /z/ ending.
+  #expect(result.contains("dəɡɹˈi"))
+  #expect(!result.contains("dəɡɹˈiz"))
+  #expect(result.contains("fˈɛɹənhˌIt"))
+}
+
 // Intra-word hyphens should not produce an em-dash pause
 @Test func testIntraWordHyphen_NoPause() async throws {
   let englishG2P = EnglishG2P(british: false)
