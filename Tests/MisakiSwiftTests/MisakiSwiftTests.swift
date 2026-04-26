@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import MisakiSwift
 
@@ -227,4 +228,106 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   let (result, _) = englishG2P.phonemize(text: "She works at Apple Inc.")
   #expect(result.contains("ˈɪŋk"))     // "ink" phoneme appears
   #expect(result.hasSuffix("."))       // trailing period preserved as terminator
+}
+
+// The substitution-tracking helper underpins surface-text preservation.
+// It rewrites the text and records each substitution so the post-tokenize
+// step can map expanded tokens back to the original abbreviations.
+@Test func testAbbreviations_TrackedSubstitutions() async throws {
+  // Mid-sentence: "Jr." → "Junior". The dropped period has no separate token
+  // to live in, so it folds into the substitution's originalText to keep
+  // chyron rendering and highlight ranges accurate.
+  let mid = EnglishG2P.applyAbbreviationReplacements(to: "Harold Jones Jr. went home.")
+  #expect(mid.text == "Harold Jones Junior went home.")
+  #expect(mid.substitutions.count == 1)
+  #expect(mid.substitutions[0].originalText == "Jr.")  // includes the dropped period
+  #expect(mid.substitutions[0].expansion == "Junior")
+  let modifiedSlice = (mid.text as NSString).substring(with: mid.substitutions[0].modifiedNSRange)
+  #expect(modifiedSlice == "Junior")
+
+  // End-of-input: "Inc." → "Ink." — the period is preserved as its own token
+  // in the modified text, so the substitution covers just "Inc" (letters
+  // only). If we included the period here the chyron would render "Apple
+  // Inc.." (double period) when concatenating the period token's text.
+  let eoi = EnglishG2P.applyAbbreviationReplacements(to: "She works at Apple Inc.")
+  #expect(eoi.text == "She works at Apple Ink.")
+  #expect(eoi.substitutions.count == 1)
+  #expect(eoi.substitutions[0].originalText == "Inc")  // letters only
+  #expect(eoi.substitutions[0].expansion == "Ink")
+  let eoiSlice = (eoi.text as NSString).substring(with: eoi.substitutions[0].modifiedNSRange)
+  #expect(eoiSlice == "Ink")
+
+  // Multiple abbreviations in one text — each is tracked independently.
+  let multi = EnglishG2P.applyAbbreviationReplacements(to: "Capt. Smith met Sen. Jones.")
+  #expect(multi.text == "Captain Smith met Senator Jones.")
+  #expect(multi.substitutions.count == 2)
+  #expect(multi.substitutions[0].originalText == "Capt.")
+  #expect(multi.substitutions[0].expansion == "Captain")
+  #expect(multi.substitutions[1].originalText == "Sen.")
+  #expect(multi.substitutions[1].expansion == "Senator")
+}
+
+// After phonemize() runs, the returned tokens for an abbreviated word must
+// expose the *original* surface text in `token.text` (so the kokoro app's
+// chyron and underline-highlighter can find them via substring search in
+// the original input) while carrying the expansion in `_.alias` for lexicon
+// lookup. Without this, the chyron would display "Junior" instead of "Jr."
+// and `text.range(of: token.text)` would fail to find "Junior" in the input.
+@Test func testAbbreviations_TokenSurfaceTextPreserved() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "Harold Jones Jr. went to the store.")
+
+  // Mid-sentence: token surface includes the original period so the chyron
+  // and highlight underline cover "Jr." in the original input, not just "Jr".
+  let jrToken = tokens.first { $0.text == "Jr." }
+  #expect(jrToken != nil, "expected a token whose text is the original 'Jr.', not the expansion")
+  #expect(jrToken?.`_`.alias == "Junior", "the token's alias must be the expansion so the lexicon looks up 'Junior'")
+
+  // The expanded form must NOT appear as a token's surface text.
+  #expect(!tokens.contains(where: { $0.text == "Junior" }))
+}
+
+@Test func testAbbreviations_TokenSurfaceTextPreservedForCompany() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "Apple Inc. is a valuable company.")
+
+  let incToken = tokens.first { $0.text == "Inc." }
+  #expect(incToken != nil)
+  #expect(incToken?.`_`.alias == "Ink")
+  #expect(!tokens.contains(where: { $0.text == "Ink" }))
+}
+
+@Test func testAbbreviations_TokenSurfaceTextPreservedForMultiple() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "Capt. Smith met Sen. Jones.")
+
+  let captToken = tokens.first { $0.text == "Capt." }
+  let senToken = tokens.first { $0.text == "Sen." }
+  #expect(captToken != nil)
+  #expect(senToken != nil)
+  #expect(captToken?.`_`.alias == "Captain")
+  #expect(senToken?.`_`.alias == "Senator")
+  #expect(!tokens.contains(where: { $0.text == "Captain" }))
+  #expect(!tokens.contains(where: { $0.text == "Senator" }))
+}
+
+// End-of-input case: the substitution covers only the abbreviation letters
+// because the trailing period stays as its own token in the modified text.
+// So the "Inc" token gets text="Inc" (no period) and a separate "." token
+// follows, and concatenating the two yields "Inc." for chyron rendering.
+@Test func testAbbreviations_TokenSurfaceTextPreservedAtEndOfInput() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "She works at Apple Inc.")
+
+  let incToken = tokens.first { $0.text == "Inc" }
+  #expect(incToken != nil, "expected a token whose text is the original letters 'Inc'")
+  #expect(incToken?.`_`.alias == "Ink")
+
+  // A separate sentence-terminator period token must follow so prosody and
+  // chyron rendering both stay correct.
+  if let incIdx = tokens.firstIndex(where: { $0.text == "Inc" }), incIdx + 1 < tokens.count {
+    #expect(tokens[incIdx + 1].text == ".")
+  } else {
+    Issue.record("expected a '.' token immediately after the 'Inc' token")
+  }
 }

@@ -83,8 +83,14 @@ final public class EnglishG2P {
   //   • At end of input the original period doubles as the sentence terminator
   //     (and dropping it would lose the final-utterance prosody) — keep it.
   //   • Anywhere else the period was just an abbreviation marker — drop it.
-  // The two stages must run in this order; the general stage would otherwise
-  // consume the end-of-input match first and strip the sentence terminator.
+  //
+  // Surface-text preservation: the substitution is later "undone" at the
+  // MToken level — see applyAbbreviationAliases(...). Each AbbreviationSubstitution
+  // remembers the original abbreviation letters and where the expansion now
+  // sits in the modified text, so tokenize() can restore token.text to the
+  // original ("Jr.") while leaving _.alias = expansion ("Junior") for lexicon
+  // lookup. This keeps the chyron and the underline-highlighter (both of which
+  // search the original input string) working correctly.
   private static let abbreviations: [(abbrev: String, expansion: String)] = [
     // Name suffixes
     ("Jr", "Junior"),
@@ -115,25 +121,124 @@ final public class EnglishG2P {
     ("Pvt", "Private"),
   ]
 
-  private static let endOfInputAbbreviationReplacements: [(NSRegularExpression, String)] = abbreviations.map { (abbrev, expansion) in
-    (try! NSRegularExpression(pattern: "(?i)\\b\(abbrev)\\.(?=\\s*$)", options: []), "\(expansion).")
+  private static let endOfInputAbbreviationRegexes: [(abbrev: String, expansion: String, regex: NSRegularExpression)] = abbreviations.map { (abbrev, expansion) in
+    (abbrev, expansion, try! NSRegularExpression(pattern: "(?i)\\b\(abbrev)\\.(?=\\s*$)", options: []))
   }
 
-  private static let midSentenceAbbreviationReplacements: [(NSRegularExpression, String)] = abbreviations.map { (abbrev, expansion) in
-    (try! NSRegularExpression(pattern: "(?i)\\b\(abbrev)\\.", options: []), expansion)
+  private static let midSentenceAbbreviationRegexes: [(abbrev: String, expansion: String, regex: NSRegularExpression)] = abbreviations.map { (abbrev, expansion) in
+    (abbrev, expansion, try! NSRegularExpression(pattern: "(?i)\\b\(abbrev)\\.", options: []))
+  }
+
+  /// Tracks one abbreviation that was rewritten during preprocessing. Used
+  /// after tokenization to restore `token.text` to the original surface form
+  /// (so the kokoro app can still search for it in the original input) while
+  /// leaving `token._.alias` set to the expansion for lexicon lookup.
+  struct AbbreviationSubstitution {
+    /// The original abbreviation letters that the user typed, e.g. "Jr" or
+    /// "Inc". Excludes the trailing period so the value is suitable both for
+    /// substring search in the original text and for assignment to token.text.
+    let originalText: String
+    /// The lookup form fed to the lexicon, e.g. "Junior". Excludes the period.
+    let expansion: String
+    /// Where the expansion now sits in the post-abbreviation text. Stored as
+    /// NSRange (UTF-16 offsets) rather than Range<String.Index> because the
+    /// downstream `result` string in preprocess() is a separate String
+    /// instance, and NSRange survives that boundary while String.Index does
+    /// not. Token ranges come back as Range<String.Index> from NLTagger but
+    /// they convert losslessly to NSRange against the same text.
+    let modifiedNSRange: NSRange
   }
 
   static func normalizeAbbreviations(_ text: String) -> String {
-    var result = text
-    for (regex, template) in endOfInputAbbreviationReplacements {
-      let range = NSRange(result.startIndex..., in: result)
-      result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: template)
+    applyAbbreviationReplacements(to: text).text
+  }
+
+  /// Walk the input once, rewriting every period-terminated abbreviation and
+  /// recording an AbbreviationSubstitution for each. The two stages (end-of-
+  /// input vs mid-sentence) collide on the same abbreviation token if the text
+  /// happens to end with one — in that case the end-of-input variant wins so
+  /// the trailing period is preserved as a sentence terminator.
+  static func applyAbbreviationReplacements(to text: String) -> (text: String, substitutions: [AbbreviationSubstitution]) {
+    struct PendingMatch {
+      let abbreviationRange: Range<String.Index>  // Just the abbrev letters in `text`
+      let entireRange: Range<String.Index>         // Letters + the trailing period
+      let expansion: String
+      let keepPeriod: Bool
     }
-    for (regex, template) in midSentenceAbbreviationReplacements {
-      let range = NSRange(result.startIndex..., in: result)
-      result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: template)
+
+    var pending: [PendingMatch] = []
+    let nsRange = NSRange(text.startIndex..., in: text)
+
+    for (abbrev, expansion, regex) in endOfInputAbbreviationRegexes {
+      for match in regex.matches(in: text, options: [], range: nsRange) {
+        guard let entireRange = Range(match.range, in: text) else { continue }
+        let abbrevEnd = text.index(entireRange.lowerBound, offsetBy: abbrev.count)
+        pending.append(PendingMatch(
+          abbreviationRange: entireRange.lowerBound..<abbrevEnd,
+          entireRange: entireRange,
+          expansion: expansion,
+          keepPeriod: true
+        ))
+      }
     }
-    return result
+
+    for (abbrev, expansion, regex) in midSentenceAbbreviationRegexes {
+      for match in regex.matches(in: text, options: [], range: nsRange) {
+        guard let entireRange = Range(match.range, in: text) else { continue }
+        if pending.contains(where: { $0.entireRange.overlaps(entireRange) }) { continue }
+        let abbrevEnd = text.index(entireRange.lowerBound, offsetBy: abbrev.count)
+        pending.append(PendingMatch(
+          abbreviationRange: entireRange.lowerBound..<abbrevEnd,
+          entireRange: entireRange,
+          expansion: expansion,
+          keepPeriod: false
+        ))
+      }
+    }
+
+    pending.sort(by: { $0.entireRange.lowerBound < $1.entireRange.lowerBound })
+
+    var result = ""
+    var substitutions: [AbbreviationSubstitution] = []
+    var lastEnd = text.startIndex
+
+    for match in pending {
+      result.append(contentsOf: text[lastEnd..<match.entireRange.lowerBound])
+
+      // For end-of-input cases the trailing period stays in the modified text
+      // as its own token, so the originalText we hand back covers just the
+      // abbreviation letters. For mid-sentence cases the period was dropped
+      // (no separate "." token follows), so we fold the period into the
+      // originalText — otherwise the chyron would render "Apple Inc is here"
+      // without the period after "Inc", and the highlight would underline
+      // only "Inc" instead of "Inc.".
+      let originalAbbrevText: String
+      if match.keepPeriod {
+        originalAbbrevText = String(text[match.abbreviationRange])
+      } else {
+        originalAbbrevText = String(text[match.entireRange])
+      }
+
+      let modifiedStartUTF16 = (result as NSString).length
+      result.append(match.expansion)
+      let modifiedEndUTF16 = (result as NSString).length
+
+      substitutions.append(AbbreviationSubstitution(
+        originalText: originalAbbrevText,
+        expansion: match.expansion,
+        modifiedNSRange: NSRange(location: modifiedStartUTF16, length: modifiedEndUTF16 - modifiedStartUTF16)
+      ))
+
+      if match.keepPeriod {
+        result.append(".")
+      }
+
+      lastEnd = match.entireRange.upperBound
+    }
+
+    result.append(contentsOf: text[lastEnd..<text.endIndex])
+
+    return (text: result, substitutions: substitutions)
   }
   
   struct PreprocessFeature {
@@ -237,7 +342,7 @@ final public class EnglishG2P {
   }
     
   // Text pre-processing tuple for easing the tokenization
-  typealias PreprocessTuple = (text: String, tokens: [String], features: [PreprocessFeature])
+  typealias PreprocessTuple = (text: String, tokens: [String], features: [PreprocessFeature], abbreviations: [AbbreviationSubstitution])
     
   /// Preprocesses the string in case there are some parts where the pronounciation or stress is pre-dictated using Markdown-like link format, e.g.
   /// "[Misaki](/misˈɑki/) is a G2P engine designed for [Kokoro](/kˈOkəɹO/) models."
@@ -252,10 +357,15 @@ final public class EnglishG2P {
     // Expand temperature measurements (e.g. "110°F") and period-terminated
     // abbreviations (e.g. "Jr.", "Inc.") into spoken form before tokenization,
     // so the degree symbol and unknown-abbreviation tokens don't derail the
-    // phonemizer.
-    let input = EnglishG2P.normalizeAbbreviations(
-      EnglishG2P.normalizeTemperatures(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    // phonemizer. The abbreviation rewrite returns the substitutions it made
+    // so tokenize() can later restore the original surface text on the
+    // resulting tokens (the chyron and underline-highlighter both search the
+    // original input for token.text).
+    let abbreviationResult = EnglishG2P.applyAbbreviationReplacements(
+      to: EnglishG2P.normalizeTemperatures(text.trimmingCharacters(in: .whitespacesAndNewlines))
     )
+    let input = abbreviationResult.text
+    let abbreviationSubstitutions = abbreviationResult.substitutions
     var lastEnd = input.startIndex
     let ns = input as NSString
     let fullRange = NSRange(location: 0, length: ns.length)
@@ -298,9 +408,9 @@ final public class EnglishG2P {
       tokens.append(contentsOf: String(input[lastEnd...]).split(separator: " ").map(String.init))
     }
     
-    return (text: result, tokens: tokens, features: features)
+    return (text: result, tokens: tokens, features: features, abbreviations: abbreviationSubstitutions)
   }
-    
+
   private func tokenize(preprocessedText: PreprocessTuple) -> [MToken] {
     var mutableTokens: [MToken] = []
     
@@ -343,6 +453,31 @@ final public class EnglishG2P {
               } else if string.hasPrefix("#") {
                 token.`_`.num_flags = String(string.dropFirst())
               }
+          }
+        }
+      }
+    }
+
+    // Restore original surface text on tokens that were rewritten by the
+    // abbreviation pass. token.text becomes the original ("Jr."/"Inc.") so
+    // downstream consumers searching the original input string can still find
+    // it; token._.alias becomes the expansion ("Junior"/"Ink") so the lexicon
+    // path in transcribe() looks up the correct phonemes (see Lexicon.swift's
+    // `if let alias = token.`_`.alias { word = alias }`). The token's NLTag
+    // and tokenRange are left alone — we only relabel surface and lookup.
+    if !preprocessedText.abbreviations.isEmpty {
+      var claimed = Set<Int>()
+      for token in mutableTokens {
+        let tokenNSRange = NSRange(token.tokenRange, in: preprocessedText.text)
+        for (i, sub) in preprocessedText.abbreviations.enumerated() where !claimed.contains(i) {
+          let subEnd = sub.modifiedNSRange.location + sub.modifiedNSRange.length
+          let tokenEnd = tokenNSRange.location + tokenNSRange.length
+          // Token must sit entirely within the substitution's range.
+          if sub.modifiedNSRange.location <= tokenNSRange.location && tokenEnd <= subEnd {
+            token.text = sub.originalText
+            token.`_`.alias = sub.expansion
+            claimed.insert(i)
+            break
           }
         }
       }
@@ -519,7 +654,7 @@ final public class EnglishG2P {
     if performPreprocess {
         pre = self.preprocess(text: text)
     } else {
-        pre = (text: text, tokens: [], features: [])
+        pre = (text: text, tokens: [], features: [], abbreviations: [])
     }
 
     var tokens = tokenize(preprocessedText: pre)
