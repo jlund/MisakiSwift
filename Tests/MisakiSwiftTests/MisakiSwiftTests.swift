@@ -141,3 +141,90 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   // A spaced em-dash should still produce a pause
   #expect(result.contains("—"))
 }
+
+// Period-terminated abbreviations like "Jr." and "Inc." should be expanded
+// to a real word at preprocessing time. Without this, the lexicon falls
+// through to letter-by-letter spelling, producing garbled audio.
+@Test func testAbbreviations_NormalizationHelper() async throws {
+  // Mid-sentence position: drop the trailing period so the expanded word
+  // (now a regular dictionary word, no longer recognized as an abbreviation)
+  // doesn't introduce a fake sentence break and unnatural pause.
+  #expect(EnglishG2P.normalizeAbbreviations("Harold Jones Jr. went home.") == "Harold Jones Junior went home.")
+  #expect(EnglishG2P.normalizeAbbreviations("Apple Inc. is here.") == "Apple Ink is here.")
+  #expect(EnglishG2P.normalizeAbbreviations("Acme Co. signed.") == "Acme Company signed.")
+  #expect(EnglishG2P.normalizeAbbreviations("Globex Corp. opened.") == "Globex Corporation opened.")
+  #expect(EnglishG2P.normalizeAbbreviations("Initech Ltd. closed.") == "Initech Limited closed.")
+  #expect(EnglishG2P.normalizeAbbreviations("Gov. Newsom spoke.") == "Governor Newsom spoke.")
+  #expect(EnglishG2P.normalizeAbbreviations("Sen. Warren and Rep. Lee spoke.") == "Senator Warren and Representative Lee spoke.")
+  #expect(EnglishG2P.normalizeAbbreviations("Rev. Smith and Fr. Brown.") == "Reverend Smith and Father Brown.")
+  #expect(EnglishG2P.normalizeAbbreviations("Capt. Kirk and Lt. Uhura.") == "Captain Kirk and Lieutenant Uhura.")
+  #expect(EnglishG2P.normalizeAbbreviations("Col. Mustard, Sgt. Pepper.") == "Colonel Mustard, Sergeant Pepper.")
+
+  // End-of-input position: keep the trailing period, since it doubles as
+  // the sentence terminator and dropping it would lose final-utterance prosody.
+  #expect(EnglishG2P.normalizeAbbreviations("Sammy Davis Sr.") == "Sammy Davis Senior.")
+  #expect(EnglishG2P.normalizeAbbreviations("John Smith, Esq.") == "John Smith, Esquire.")
+  #expect(EnglishG2P.normalizeAbbreviations("She works at Apple Inc.") == "She works at Apple Ink.")
+  #expect(EnglishG2P.normalizeAbbreviations("She works at Apple Inc.   ") == "She works at Apple Ink.   ")
+  #expect(EnglishG2P.normalizeAbbreviations("She works at Apple Inc.\n") == "She works at Apple Ink.\n")
+
+  // Case-insensitive matching, capitalized replacement
+  #expect(EnglishG2P.normalizeAbbreviations("APPLE INC.") == "APPLE Ink.")
+  #expect(EnglishG2P.normalizeAbbreviations("apple inc.") == "apple Ink.")
+  #expect(EnglishG2P.normalizeAbbreviations("jr.") == "Junior.")
+
+  // No-op cases: bare letters without trailing period must not be rewritten,
+  // since matching them would over-trigger on names that share the letters.
+  #expect(EnglishG2P.normalizeAbbreviations("Jr without period") == "Jr without period")
+  #expect(EnglishG2P.normalizeAbbreviations("Inc operating loss") == "Inc operating loss")
+
+  // Mid-word matches must not fire. The longer real word "Junior" must not
+  // be rewritten because its leading "Jr" is followed by "u", not ".".
+  #expect(EnglishG2P.normalizeAbbreviations("She is a Junior at school.") == "She is a Junior at school.")
+
+  // Existing internal-period acronyms must be untouched (handled separately
+  // by the lexicon's getSpecialCase).
+  #expect(EnglishG2P.normalizeAbbreviations("M.R.C.S.") == "M.R.C.S.")
+  #expect(EnglishG2P.normalizeAbbreviations("Mr. Smith") == "Mr. Smith")
+}
+
+@Test func testAbbreviations_JuniorEndToEnd() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "Harold Jones Jr. went to the store.")
+  // Must contain the "junior" phoneme, not letter-by-letter J-R spelling.
+  #expect(result.contains("ʤˈunjəɹ"))
+  // Mid-sentence: "Junior" must not be followed by a period in the phoneme
+  // output, otherwise downstream prosody inserts a fake sentence break.
+  #expect(!result.contains("ʤˈunjəɹ."))
+}
+
+@Test func testAbbreviations_IncEndToEnd() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "Apple Inc. is a valuable company.")
+  // Must contain the "ink" phoneme, not garbled fallback output.
+  #expect(result.contains("ˈɪŋk"))
+  // Mid-sentence: no fake sentence break after "Ink".
+  #expect(!result.contains("ˈɪŋk."))
+}
+
+@Test func testAbbreviations_TitleAndRankEndToEnd() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "Capt. Smith met Sen. Jones.")
+  #expect(result.contains("kˈæptᵊn"))   // captain
+  // "sˈɛnə" is the senator prefix; the medial T allophone (ɾ vs T) can vary
+  // by phonological context, but the senator-not-letters part is what matters.
+  #expect(result.contains("sˈɛnə"))
+  // Neither expanded title should be followed by a period — they're both
+  // mid-sentence and would produce unnatural pauses if treated as terminators.
+  #expect(!result.contains("kˈæptᵊn."))
+  #expect(!result.contains("sˈɛnə."))
+}
+
+// At end of input, the original period doubles as the sentence terminator,
+// so the expanded form must keep its period to retain final-utterance prosody.
+@Test func testAbbreviations_EndOfInputKeepsTerminator() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "She works at Apple Inc.")
+  #expect(result.contains("ˈɪŋk"))     // "ink" phoneme appears
+  #expect(result.hasSuffix("."))       // trailing period preserved as terminator
+}

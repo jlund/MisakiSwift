@@ -63,6 +63,78 @@ final public class EnglishG2P {
     }
     return result
   }
+
+  // Period-terminated abbreviations the lexicon doesn't know how to pronounce.
+  // The lexicon has entries for Dr/Mr/Mrs but not these, and getSpecialCase()
+  // only recognizes the *internal*-period acronym pattern (e.g. M.R.C.S.), so
+  // tokens like "Jr." fall through to getNNP() which spells them letter-by-
+  // letter — "Jr." comes out as "jay-arr" (sounds like "geez"), "Inc." comes
+  // out garbled. Expanding to a real word at preprocessing time sidesteps
+  // tokenization, POS-tagging, and lexicon-fallback fragility entirely.
+  //
+  // Each pattern requires a literal trailing period, so prefix collisions
+  // (e.g. "Co" vs "Col", "Cpl") can't fire — the period anchor disambiguates.
+  //
+  // Period handling: NLTagger has built-in knowledge that "Mr."/"Dr." are
+  // abbreviations and doesn't break a sentence on their period. Once we
+  // substitute the abbreviation for a regular word, that hint is gone — a
+  // preserved period after "Reverend" or "Captain" mid-sentence would be read
+  // as a sentence terminator and produce an unnatural pause. So:
+  //   • At end of input the original period doubles as the sentence terminator
+  //     (and dropping it would lose the final-utterance prosody) — keep it.
+  //   • Anywhere else the period was just an abbreviation marker — drop it.
+  // The two stages must run in this order; the general stage would otherwise
+  // consume the end-of-input match first and strip the sentence terminator.
+  private static let abbreviations: [(abbrev: String, expansion: String)] = [
+    // Name suffixes
+    ("Jr", "Junior"),
+    ("Sr", "Senior"),
+    ("Esq", "Esquire"),
+    // Company designations
+    ("Inc", "Ink"),
+    ("Ltd", "Limited"),
+    ("Corp", "Corporation"),
+    ("Co", "Company"),
+    // Civilian titles
+    ("Hon", "Honorable"),
+    ("Gov", "Governor"),
+    ("Sen", "Senator"),
+    ("Rep", "Representative"),
+    ("Pres", "President"),
+    ("Sec", "Secretary"),
+    ("Rev", "Reverend"),
+    ("Fr", "Father"),
+    // Military ranks
+    ("Gen", "General"),
+    ("Lt", "Lieutenant"),
+    ("Col", "Colonel"),
+    ("Maj", "Major"),
+    ("Capt", "Captain"),
+    ("Sgt", "Sergeant"),
+    ("Cpl", "Corporal"),
+    ("Pvt", "Private"),
+  ]
+
+  private static let endOfInputAbbreviationReplacements: [(NSRegularExpression, String)] = abbreviations.map { (abbrev, expansion) in
+    (try! NSRegularExpression(pattern: "(?i)\\b\(abbrev)\\.(?=\\s*$)", options: []), "\(expansion).")
+  }
+
+  private static let midSentenceAbbreviationReplacements: [(NSRegularExpression, String)] = abbreviations.map { (abbrev, expansion) in
+    (try! NSRegularExpression(pattern: "(?i)\\b\(abbrev)\\.", options: []), expansion)
+  }
+
+  static func normalizeAbbreviations(_ text: String) -> String {
+    var result = text
+    for (regex, template) in endOfInputAbbreviationReplacements {
+      let range = NSRange(result.startIndex..., in: result)
+      result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: template)
+    }
+    for (regex, template) in midSentenceAbbreviationReplacements {
+      let range = NSRange(result.startIndex..., in: result)
+      result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: template)
+    }
+    return result
+  }
   
   struct PreprocessFeature {
     enum Value {
@@ -177,9 +249,13 @@ final public class EnglishG2P {
     var tokens: [String] = []
     var features: [PreprocessFeature] = []
 
-    // Expand temperature measurements (e.g. "110°F") into spoken form before
-    // tokenization, so the degree symbol does not derail the phonemizer.
-    let input = EnglishG2P.normalizeTemperatures(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    // Expand temperature measurements (e.g. "110°F") and period-terminated
+    // abbreviations (e.g. "Jr.", "Inc.") into spoken form before tokenization,
+    // so the degree symbol and unknown-abbreviation tokens don't derail the
+    // phonemizer.
+    let input = EnglishG2P.normalizeAbbreviations(
+      EnglishG2P.normalizeTemperatures(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    )
     var lastEnd = input.startIndex
     let ns = input as NSString
     let fullRange = NSRange(location: 0, length: ns.length)
