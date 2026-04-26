@@ -62,7 +62,7 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
 @Test func testRetokenize_DecimalCurrencyPounds() async throws {
   let englishG2P = EnglishG2P(british: true)
   let (result, _) = englishG2P.phonemize(text: "It costs £9.99 per month.")
-  #expect(result.contains("pˈQndz"))   // "pounds" phoneme
+  #expect(result.contains("pˈWndz"))   // "pounds" phoneme
   #expect(result.contains("pˈɛns"))    // "pence" phoneme
 }
 
