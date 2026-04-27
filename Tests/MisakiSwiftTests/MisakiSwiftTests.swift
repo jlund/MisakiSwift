@@ -128,6 +128,108 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   #expect(result.contains("fˈɛɹənhˌIt"))
 }
 
+// Surface-text preservation for temperatures: same problem the abbreviation
+// case had, but 1:N — "110°F" expands to three lookup tokens (110, degrees,
+// Fahrenheit). The first covered token must keep "110°F" as its surface text
+// so the chyron and the underline-highlighter still see the original input,
+// while phoneme generation uses each lookup word in turn.
+@Test func testTemperatures_TrackedSubstitutions() async throws {
+  let result = EnglishG2P.applyTemperatureReplacements(to: "It was 110°F today.")
+  #expect(result.text == "It was 110 degrees Fahrenheit today.")
+  #expect(result.substitutions.count == 1)
+  #expect(result.substitutions[0].originalText == "110°F")
+  #expect(result.substitutions[0].lookupWords == ["110", "degrees", "Fahrenheit"])
+  let modifiedSlice = (result.text as NSString).substring(with: result.substitutions[0].modifiedNSRange)
+  #expect(modifiedSlice == "110 degrees Fahrenheit")
+
+  // Singular form keeps "degree" not "degrees".
+  let singular = EnglishG2P.applyTemperatureReplacements(to: "It dropped to 1°F overnight.")
+  #expect(singular.substitutions.count == 1)
+  #expect(singular.substitutions[0].originalText == "1°F")
+  #expect(singular.substitutions[0].lookupWords == ["1", "degree", "Fahrenheit"])
+
+  // Decimal numbers like "98.6°F" must be captured in their entirety, not
+  // just the trailing digit. The widened regex is what makes this work.
+  let decimal = EnglishG2P.applyTemperatureReplacements(to: "Body temperature is 98.6°F.")
+  #expect(decimal.substitutions.count == 1)
+  #expect(decimal.substitutions[0].originalText == "98.6°F")
+  #expect(decimal.substitutions[0].lookupWords == ["98.6", "degrees", "Fahrenheit"])
+
+  // Celsius and bare-degree variants get the same treatment.
+  let celsius = EnglishG2P.applyTemperatureReplacements(to: "Water boils at 100°C.")
+  #expect(celsius.substitutions.count == 1)
+  #expect(celsius.substitutions[0].originalText == "100°C")
+  #expect(celsius.substitutions[0].lookupWords == ["100", "degrees", "Celsius"])
+
+  let bare = EnglishG2P.applyTemperatureReplacements(to: "The angle is 45° from vertical.")
+  #expect(bare.substitutions.count == 1)
+  #expect(bare.substitutions[0].originalText == "45°")
+  #expect(bare.substitutions[0].lookupWords == ["45", "degrees"])
+}
+
+@Test func testTemperatures_TokenSurfaceTextPreserved() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "The temperature was 110°F today.")
+
+  // The original surface "110°F" must be present as a token text. The
+  // expansion words must NOT leak into any token text.
+  #expect(tokens.contains(where: { $0.text == "110°F" }))
+  #expect(!tokens.contains(where: { $0.text == "degrees" }))
+  #expect(!tokens.contains(where: { $0.text == "Fahrenheit" }))
+
+  // Phoneme lookup still happens via aliases — the surface-bearing token
+  // looks up "110", and there are display-suppressed tokens for "degrees"
+  // and "Fahrenheit".
+  let surfaceToken = tokens.first { $0.text == "110°F" }
+  #expect(surfaceToken?.`_`.alias == "110")
+  #expect(tokens.contains(where: { $0.text == "" && $0.`_`.alias == "degrees" }))
+  #expect(tokens.contains(where: { $0.text == "" && $0.`_`.alias == "Fahrenheit" }))
+}
+
+// Reconstruct the chyron string by concatenating `text + whitespace` over
+// the returned tokens — it must equal the user's original input verbatim.
+// This is the actual signal the kokoro app's chyron uses (per the agent
+// audit of TextGoesHearModel.updateHighlightingForTime).
+@Test func testTemperatures_ChyronConcatenationFahrenheit() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "It was 110°F today.")
+  let chyron = tokens.map { $0.text + $0.whitespace }.joined()
+  #expect(chyron == "It was 110°F today.")
+}
+
+@Test func testTemperatures_ChyronConcatenationCelsius() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "Water boils at 100°C.")
+  let chyron = tokens.map { $0.text + $0.whitespace }.joined()
+  #expect(chyron == "Water boils at 100°C.")
+}
+
+@Test func testTemperatures_ChyronConcatenationBareDegree() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "The angle is 45° from vertical.")
+  let chyron = tokens.map { $0.text + $0.whitespace }.joined()
+  #expect(chyron == "The angle is 45° from vertical.")
+}
+
+@Test func testTemperatures_ChyronConcatenationSingular() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "It dropped to 1°F overnight.")
+  let chyron = tokens.map { $0.text + $0.whitespace }.joined()
+  #expect(chyron == "It dropped to 1°F overnight.")
+}
+
+// Combined input: an abbreviation and a temperature in the same sentence
+// must both round-trip through the chyron concatenation. This is the case
+// that motivated the unified single-pass `applyAllReplacements` — a chained
+// approach corrupts substitution positions when one rewrite shifts text the
+// other one already recorded a position against.
+@Test func testTemperatures_ChyronWithAbbreviation() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "Capt. Smith said it was 110°F.")
+  let chyron = tokens.map { $0.text + $0.whitespace }.joined()
+  #expect(chyron == "Capt. Smith said it was 110°F.")
+}
+
 // Intra-word hyphens should not produce an em-dash pause
 @Test func testIntraWordHyphen_NoPause() async throws {
   let englishG2P = EnglishG2P(british: false)
@@ -241,7 +343,7 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   #expect(mid.text == "Harold Jones Junior went home.")
   #expect(mid.substitutions.count == 1)
   #expect(mid.substitutions[0].originalText == "Jr.")  // includes the dropped period
-  #expect(mid.substitutions[0].expansion == "Junior")
+  #expect(mid.substitutions[0].lookupWords == ["Junior"])
   let modifiedSlice = (mid.text as NSString).substring(with: mid.substitutions[0].modifiedNSRange)
   #expect(modifiedSlice == "Junior")
 
@@ -253,7 +355,7 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   #expect(eoi.text == "She works at Apple Ink.")
   #expect(eoi.substitutions.count == 1)
   #expect(eoi.substitutions[0].originalText == "Inc")  // letters only
-  #expect(eoi.substitutions[0].expansion == "Ink")
+  #expect(eoi.substitutions[0].lookupWords == ["Ink"])
   let eoiSlice = (eoi.text as NSString).substring(with: eoi.substitutions[0].modifiedNSRange)
   #expect(eoiSlice == "Ink")
 
@@ -262,9 +364,9 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   #expect(multi.text == "Captain Smith met Senator Jones.")
   #expect(multi.substitutions.count == 2)
   #expect(multi.substitutions[0].originalText == "Capt.")
-  #expect(multi.substitutions[0].expansion == "Captain")
+  #expect(multi.substitutions[0].lookupWords == ["Captain"])
   #expect(multi.substitutions[1].originalText == "Sen.")
-  #expect(multi.substitutions[1].expansion == "Senator")
+  #expect(multi.substitutions[1].lookupWords == ["Senator"])
 }
 
 // After phonemize() runs, the returned tokens for an abbreviated word must

@@ -38,30 +38,114 @@ final public class EnglishG2P {
   //
   // Singular variants match exactly "1°" (not "11°", "21°", "0.1°", etc.) so
   // that "1°F" becomes "1 degree Fahrenheit" rather than "1 degrees Fahrenheit".
+  //
+  // The plural-form patterns capture the *full* number (including any leading
+  // digits or a decimal part like "98.6") so the substitution-tracking layer
+  // can record the entire user-facing surface form ("98.6°F"). The
+  // surface-preservation pass after tokenize() needs the whole "98.6°F"
+  // string to write back into token.text — capturing only the trailing digit
+  // (`(\d)`) would let the chyron leak the modified "98.6 degrees Fahrenheit".
   private static let temperatureSingularFahrenheitRegex = try! NSRegularExpression(pattern: #"(?<![\d.])1°[Ff]\b"#, options: [])
   private static let temperatureSingularCelsiusRegex = try! NSRegularExpression(pattern: #"(?<![\d.])1°[Cc]\b"#, options: [])
   private static let temperatureSingularBareDegreeRegex = try! NSRegularExpression(pattern: #"(?<![\d.])1°"#, options: [])
-  private static let temperatureFahrenheitRegex = try! NSRegularExpression(pattern: #"(\d)°[Ff]\b"#, options: [])
-  private static let temperatureCelsiusRegex = try! NSRegularExpression(pattern: #"(\d)°[Cc]\b"#, options: [])
-  private static let temperatureBareDegreeRegex = try! NSRegularExpression(pattern: #"(\d)°"#, options: [])
+  private static let temperatureFahrenheitRegex = try! NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)°[Ff]\b"#, options: [])
+  private static let temperatureCelsiusRegex = try! NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)°[Cc]\b"#, options: [])
+  private static let temperatureBareDegreeRegex = try! NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)°"#, options: [])
+
+  /// Description of one temperature regex and the rewrite it performs.
+  /// `expansionTemplate` is an NSRegularExpression replacement template;
+  /// `lookupWordsFor(match:)` returns the post-rewrite token sequence the
+  /// surface-preservation pass needs (with the matched number filled in).
+  private struct TemperatureRule {
+    let regex: NSRegularExpression
+    let expansionTemplate: String
+    /// The fixed words after the number, e.g. ["degrees", "Fahrenheit"].
+    /// Combined with the captured number to produce `lookupWords`.
+    let trailingWords: [String]
+  }
+
+  // Singular forms (no "s" on "degree") MUST run before the plural forms so
+  // a literal "1°F" matches "1 degree" rather than the more permissive plural.
+  // The capture group in every plural pattern is the full number; for the
+  // singular patterns the captured text is always exactly "1".
+  private static let temperatureRules: [TemperatureRule] = [
+    TemperatureRule(regex: temperatureSingularFahrenheitRegex, expansionTemplate: "1 degree Fahrenheit", trailingWords: ["degree", "Fahrenheit"]),
+    TemperatureRule(regex: temperatureSingularCelsiusRegex, expansionTemplate: "1 degree Celsius", trailingWords: ["degree", "Celsius"]),
+    TemperatureRule(regex: temperatureSingularBareDegreeRegex, expansionTemplate: "1 degree", trailingWords: ["degree"]),
+    TemperatureRule(regex: temperatureFahrenheitRegex, expansionTemplate: "$1 degrees Fahrenheit", trailingWords: ["degrees", "Fahrenheit"]),
+    TemperatureRule(regex: temperatureCelsiusRegex, expansionTemplate: "$1 degrees Celsius", trailingWords: ["degrees", "Celsius"]),
+    TemperatureRule(regex: temperatureBareDegreeRegex, expansionTemplate: "$1 degrees", trailingWords: ["degrees"]),
+  ]
 
   static func normalizeTemperatures(_ text: String) -> String {
-    var result = text
-    // Singular forms must run before the plural forms so that "1°F" matches
-    // the singular pattern before the more permissive plural pattern can.
-    let replacements: [(NSRegularExpression, String)] = [
-      (temperatureSingularFahrenheitRegex, "1 degree Fahrenheit"),
-      (temperatureSingularCelsiusRegex, "1 degree Celsius"),
-      (temperatureSingularBareDegreeRegex, "1 degree"),
-      (temperatureFahrenheitRegex, "$1 degrees Fahrenheit"),
-      (temperatureCelsiusRegex, "$1 degrees Celsius"),
-      (temperatureBareDegreeRegex, "$1 degrees"),
-    ]
-    for (regex, template) in replacements {
-      let range = NSRange(result.startIndex..., in: result)
-      result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: template)
+    applyTemperatureReplacements(to: text).text
+  }
+
+  /// Walk the input once, rewriting every temperature measurement and
+  /// recording one SurfaceSubstitution per match. The surface-preservation
+  /// pass in tokenize() uses these substitutions to put the original surface
+  /// form (e.g. "110°F") back on the first NLTagger output token while
+  /// emptying the display text on the trailing word tokens — so phoneme
+  /// generation still produces "one hundred ten degrees Fahrenheit" but the
+  /// chyron and the underline-highlighter see only "110°F".
+  static func applyTemperatureReplacements(to text: String) -> (text: String, substitutions: [SurfaceSubstitution]) {
+    struct PendingMatch {
+      let originalRange: Range<String.Index>  // Full match in the original text
+      let numberText: String                  // Captured number, e.g. "110" or "98.6"
+      let rule: TemperatureRule
     }
-    return result
+
+    var pending: [PendingMatch] = []
+    let nsRange = NSRange(text.startIndex..., in: text)
+
+    for rule in temperatureRules {
+      for match in rule.regex.matches(in: text, options: [], range: nsRange) {
+        guard let originalRange = Range(match.range, in: text) else { continue }
+        // Skip if any earlier-priority rule already matched this region. The
+        // singular rules come first in `temperatureRules`, so this preserves
+        // the existing "1°F" → "1 degree Fahrenheit" behavior even though
+        // the plural pattern would also match "1°F".
+        if pending.contains(where: { $0.originalRange.overlaps(originalRange) }) { continue }
+        let numberText: String
+        if match.numberOfRanges > 1, let r = Range(match.range(at: 1), in: text) {
+          numberText = String(text[r])
+        } else {
+          // Singular patterns have no capture group; the matched number is "1".
+          numberText = "1"
+        }
+        pending.append(PendingMatch(originalRange: originalRange, numberText: numberText, rule: rule))
+      }
+    }
+
+    pending.sort(by: { $0.originalRange.lowerBound < $1.originalRange.lowerBound })
+
+    var result = ""
+    var substitutions: [SurfaceSubstitution] = []
+    var lastEnd = text.startIndex
+
+    for match in pending {
+      result.append(contentsOf: text[lastEnd..<match.originalRange.lowerBound])
+
+      let originalSurface = String(text[match.originalRange])
+      let expansion = "\(match.numberText) \(match.rule.trailingWords.joined(separator: " "))"
+      let lookupWords = [match.numberText] + match.rule.trailingWords
+
+      let modifiedStartUTF16 = (result as NSString).length
+      result.append(expansion)
+      let modifiedEndUTF16 = (result as NSString).length
+
+      substitutions.append(SurfaceSubstitution(
+        originalText: originalSurface,
+        lookupWords: lookupWords,
+        modifiedNSRange: NSRange(location: modifiedStartUTF16, length: modifiedEndUTF16 - modifiedStartUTF16)
+      ))
+
+      lastEnd = match.originalRange.upperBound
+    }
+
+    result.append(contentsOf: text[lastEnd..<text.endIndex])
+
+    return (text: result, substitutions: substitutions)
   }
 
   // Period-terminated abbreviations the lexicon doesn't know how to pronounce.
@@ -129,23 +213,38 @@ final public class EnglishG2P {
     (abbrev, expansion, try! NSRegularExpression(pattern: "(?i)\\b\(abbrev)\\.", options: []))
   }
 
-  /// Tracks one abbreviation that was rewritten during preprocessing. Used
-  /// after tokenization to restore `token.text` to the original surface form
-  /// (so the kokoro app can still search for it in the original input) while
-  /// leaving `token._.alias` set to the expansion for lexicon lookup.
-  struct AbbreviationSubstitution {
-    /// The original abbreviation letters that the user typed, e.g. "Jr" or
-    /// "Inc". Excludes the trailing period so the value is suitable both for
-    /// substring search in the original text and for assignment to token.text.
+  /// Tracks one preprocessing rewrite (e.g. `"Jr."` → `"Junior"`, or `"110°F"`
+  /// → `"110 degrees Fahrenheit"`). Used after tokenization to restore
+  /// `token.text` to the original surface form (so the kokoro app's chyron
+  /// renders the user's input verbatim and `text.range(of: token.text)` still
+  /// finds the token in the original transcript) while leaving the expansion
+  /// in `_.alias`/sibling tokens so the lexicon path produces the right
+  /// phonemes.
+  ///
+  /// The 1:1 case (abbreviations) has a single-element `lookupWords`. The
+  /// 1:N case (temperatures) has one element per word in the expansion —
+  /// the first covered token displays the original surface and looks up
+  /// `lookupWords[0]`; the remaining covered tokens are display-suppressed
+  /// (text/whitespace cleared) but each still looks up its own word so the
+  /// audio plays the full expansion.
+  struct SurfaceSubstitution {
+    /// What the user typed (e.g. `"Jr."`, `"Inc"`, `"110°F"`). For mid-
+    /// sentence abbreviations this includes the dropped trailing period;
+    /// for end-of-input abbreviations and for temperatures it does not (the
+    /// trailing period in those cases is its own token outside the
+    /// substitution range).
     let originalText: String
-    /// The lookup form fed to the lexicon, e.g. "Junior". Excludes the period.
-    let expansion: String
-    /// Where the expansion now sits in the post-abbreviation text. Stored as
+    /// The expansion split into one entry per token NLTagger will produce
+    /// from the rewritten text, in order. E.g. `["Junior"]` for `"Jr."` →
+    /// `"Junior"`, or `["110", "degrees", "Fahrenheit"]` for `"110°F"` →
+    /// `"110 degrees Fahrenheit"`.
+    let lookupWords: [String]
+    /// Where the expansion now sits in the post-rewrite text. Stored as
     /// NSRange (UTF-16 offsets) rather than Range<String.Index> because the
     /// downstream `result` string in preprocess() is a separate String
     /// instance, and NSRange survives that boundary while String.Index does
     /// not. Token ranges come back as Range<String.Index> from NLTagger but
-    /// they convert losslessly to NSRange against the same text.
+    /// convert losslessly to NSRange against the same text.
     let modifiedNSRange: NSRange
   }
 
@@ -153,12 +252,125 @@ final public class EnglishG2P {
     applyAbbreviationReplacements(to: text).text
   }
 
+  /// Combined preprocessing pass that runs every surface rewrite (currently
+  /// temperatures + abbreviations) against the *original* input in one go.
+  /// Doing both passes together — rather than chaining the two helpers —
+  /// keeps every recorded `modifiedNSRange` in the same coordinate space (the
+  /// final result text). Chaining would corrupt the first pass's positions
+  /// any time the second pass shifted text earlier in the buffer (e.g.
+  /// "Capt. Smith said it was 110°F" would get the temperature substitution
+  /// recorded against the post-temperature text, but the subsequent "Capt."
+  /// → "Captain" rewrite shifts everything after by +2, leaving the
+  /// temperature substitution pointing two characters too early).
+  ///
+  /// The standalone `applyTemperatureReplacements` and
+  /// `applyAbbreviationReplacements` helpers remain (they're useful for unit
+  /// tests that want to exercise one rewrite family in isolation), but
+  /// `preprocess()` calls only this combined function.
+  static func applyAllReplacements(to text: String) -> (text: String, substitutions: [SurfaceSubstitution]) {
+    struct PendingRewrite {
+      let originalRange: Range<String.Index>      // Span of the rewritten text in `text`
+      let originalSurfaceText: String              // Goes into SurfaceSubstitution.originalText
+      let expansion: String                        // Written to result for the substitution
+      let lookupWords: [String]                    // Goes into SurfaceSubstitution.lookupWords
+      let trailingChar: String                     // "" or "." (for end-of-input abbreviations)
+    }
+
+    var pending: [PendingRewrite] = []
+    let nsRange = NSRange(text.startIndex..., in: text)
+
+    // Temperature matches first. Singular variants are listed before plural
+    // in `temperatureRules` so the overlap-skip below preserves the existing
+    // "1°F" → "1 degree Fahrenheit" priority.
+    for rule in temperatureRules {
+      for match in rule.regex.matches(in: text, options: [], range: nsRange) {
+        guard let originalRange = Range(match.range, in: text) else { continue }
+        if pending.contains(where: { $0.originalRange.overlaps(originalRange) }) { continue }
+        let numberText: String
+        if match.numberOfRanges > 1, let r = Range(match.range(at: 1), in: text) {
+          numberText = String(text[r])
+        } else {
+          numberText = "1"
+        }
+        let lookupWords = [numberText] + rule.trailingWords
+        pending.append(PendingRewrite(
+          originalRange: originalRange,
+          originalSurfaceText: String(text[originalRange]),
+          expansion: lookupWords.joined(separator: " "),
+          lookupWords: lookupWords,
+          trailingChar: ""
+        ))
+      }
+    }
+
+    // End-of-input abbreviations next (they want to keep the trailing period
+    // as a sentence terminator, so they need to win over the mid-sentence
+    // pattern when both match at the same position).
+    for (abbrev, expansion, regex) in endOfInputAbbreviationRegexes {
+      for match in regex.matches(in: text, options: [], range: nsRange) {
+        guard let entireRange = Range(match.range, in: text) else { continue }
+        if pending.contains(where: { $0.originalRange.overlaps(entireRange) }) { continue }
+        let abbrevEnd = text.index(entireRange.lowerBound, offsetBy: abbrev.count)
+        let abbrevRange = entireRange.lowerBound..<abbrevEnd
+        pending.append(PendingRewrite(
+          originalRange: entireRange,
+          originalSurfaceText: String(text[abbrevRange]),  // letters only — period preserved as separate token
+          expansion: expansion,
+          lookupWords: [expansion],
+          trailingChar: "."
+        ))
+      }
+    }
+
+    // Mid-sentence abbreviations last.
+    for (_, expansion, regex) in midSentenceAbbreviationRegexes {
+      for match in regex.matches(in: text, options: [], range: nsRange) {
+        guard let entireRange = Range(match.range, in: text) else { continue }
+        if pending.contains(where: { $0.originalRange.overlaps(entireRange) }) { continue }
+        pending.append(PendingRewrite(
+          originalRange: entireRange,
+          originalSurfaceText: String(text[entireRange]),  // includes the period (no separate "." token follows)
+          expansion: expansion,
+          lookupWords: [expansion],
+          trailingChar: ""
+        ))
+      }
+    }
+
+    pending.sort(by: { $0.originalRange.lowerBound < $1.originalRange.lowerBound })
+
+    var result = ""
+    var substitutions: [SurfaceSubstitution] = []
+    var lastEnd = text.startIndex
+
+    for match in pending {
+      result.append(contentsOf: text[lastEnd..<match.originalRange.lowerBound])
+
+      let modifiedStartUTF16 = (result as NSString).length
+      result.append(match.expansion)
+      let modifiedEndUTF16 = (result as NSString).length
+
+      substitutions.append(SurfaceSubstitution(
+        originalText: match.originalSurfaceText,
+        lookupWords: match.lookupWords,
+        modifiedNSRange: NSRange(location: modifiedStartUTF16, length: modifiedEndUTF16 - modifiedStartUTF16)
+      ))
+
+      result.append(match.trailingChar)
+      lastEnd = match.originalRange.upperBound
+    }
+
+    result.append(contentsOf: text[lastEnd..<text.endIndex])
+
+    return (text: result, substitutions: substitutions)
+  }
+
   /// Walk the input once, rewriting every period-terminated abbreviation and
-  /// recording an AbbreviationSubstitution for each. The two stages (end-of-
+  /// recording a SurfaceSubstitution for each. The two stages (end-of-
   /// input vs mid-sentence) collide on the same abbreviation token if the text
   /// happens to end with one — in that case the end-of-input variant wins so
   /// the trailing period is preserved as a sentence terminator.
-  static func applyAbbreviationReplacements(to text: String) -> (text: String, substitutions: [AbbreviationSubstitution]) {
+  static func applyAbbreviationReplacements(to text: String) -> (text: String, substitutions: [SurfaceSubstitution]) {
     struct PendingMatch {
       let abbreviationRange: Range<String.Index>  // Just the abbrev letters in `text`
       let entireRange: Range<String.Index>         // Letters + the trailing period
@@ -182,6 +394,7 @@ final public class EnglishG2P {
       }
     }
 
+
     for (abbrev, expansion, regex) in midSentenceAbbreviationRegexes {
       for match in regex.matches(in: text, options: [], range: nsRange) {
         guard let entireRange = Range(match.range, in: text) else { continue }
@@ -199,7 +412,7 @@ final public class EnglishG2P {
     pending.sort(by: { $0.entireRange.lowerBound < $1.entireRange.lowerBound })
 
     var result = ""
-    var substitutions: [AbbreviationSubstitution] = []
+    var substitutions: [SurfaceSubstitution] = []
     var lastEnd = text.startIndex
 
     for match in pending {
@@ -223,9 +436,9 @@ final public class EnglishG2P {
       result.append(match.expansion)
       let modifiedEndUTF16 = (result as NSString).length
 
-      substitutions.append(AbbreviationSubstitution(
+      substitutions.append(SurfaceSubstitution(
         originalText: originalAbbrevText,
-        expansion: match.expansion,
+        lookupWords: [match.expansion],
         modifiedNSRange: NSRange(location: modifiedStartUTF16, length: modifiedEndUTF16 - modifiedStartUTF16)
       ))
 
@@ -342,7 +555,7 @@ final public class EnglishG2P {
   }
     
   // Text pre-processing tuple for easing the tokenization
-  typealias PreprocessTuple = (text: String, tokens: [String], features: [PreprocessFeature], abbreviations: [AbbreviationSubstitution])
+  typealias PreprocessTuple = (text: String, tokens: [String], features: [PreprocessFeature], surfaceSubstitutions: [SurfaceSubstitution])
     
   /// Preprocesses the string in case there are some parts where the pronounciation or stress is pre-dictated using Markdown-like link format, e.g.
   /// "[Misaki](/misˈɑki/) is a G2P engine designed for [Kokoro](/kˈOkəɹO/) models."
@@ -357,15 +570,15 @@ final public class EnglishG2P {
     // Expand temperature measurements (e.g. "110°F") and period-terminated
     // abbreviations (e.g. "Jr.", "Inc.") into spoken form before tokenization,
     // so the degree symbol and unknown-abbreviation tokens don't derail the
-    // phonemizer. The abbreviation rewrite returns the substitutions it made
-    // so tokenize() can later restore the original surface text on the
-    // resulting tokens (the chyron and underline-highlighter both search the
-    // original input for token.text).
-    let abbreviationResult = EnglishG2P.applyAbbreviationReplacements(
-      to: EnglishG2P.normalizeTemperatures(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    // phonemizer. The combined helper records every substitution so tokenize()
+    // can later restore the original surface text on the resulting tokens —
+    // the chyron and underline-highlighter both search the original input
+    // for token.text.
+    let rewritten = EnglishG2P.applyAllReplacements(
+      to: text.trimmingCharacters(in: .whitespacesAndNewlines)
     )
-    let input = abbreviationResult.text
-    let abbreviationSubstitutions = abbreviationResult.substitutions
+    let input = rewritten.text
+    let surfaceSubstitutions = rewritten.substitutions
     var lastEnd = input.startIndex
     let ns = input as NSString
     let fullRange = NSRange(location: 0, length: ns.length)
@@ -408,7 +621,7 @@ final public class EnglishG2P {
       tokens.append(contentsOf: String(input[lastEnd...]).split(separator: " ").map(String.init))
     }
     
-    return (text: result, tokens: tokens, features: features, abbreviations: abbreviationSubstitutions)
+    return (text: result, tokens: tokens, features: features, surfaceSubstitutions: surfaceSubstitutions)
   }
 
   private func tokenize(preprocessedText: PreprocessTuple) -> [MToken] {
@@ -458,28 +671,42 @@ final public class EnglishG2P {
       }
     }
 
-    // Restore original surface text on tokens that were rewritten by the
-    // abbreviation pass. token.text becomes the original ("Jr."/"Inc.") so
-    // downstream consumers searching the original input string can still find
-    // it; token._.alias becomes the expansion ("Junior"/"Ink") so the lexicon
-    // path in transcribe() looks up the correct phonemes (see Lexicon.swift's
-    // `if let alias = token.`_`.alias { word = alias }`). The token's NLTag
-    // and tokenRange are left alone — we only relabel surface and lookup.
-    if !preprocessedText.abbreviations.isEmpty {
-      var claimed = Set<Int>()
-      for token in mutableTokens {
-        let tokenNSRange = NSRange(token.tokenRange, in: preprocessedText.text)
-        for (i, sub) in preprocessedText.abbreviations.enumerated() where !claimed.contains(i) {
-          let subEnd = sub.modifiedNSRange.location + sub.modifiedNSRange.length
-          let tokenEnd = tokenNSRange.location + tokenNSRange.length
-          // Token must sit entirely within the substitution's range.
-          if sub.modifiedNSRange.location <= tokenNSRange.location && tokenEnd <= subEnd {
-            token.text = sub.originalText
-            token.`_`.alias = sub.expansion
-            claimed.insert(i)
-            break
-          }
-        }
+    // Restore original surface text on tokens that were rewritten during
+    // preprocessing (abbreviations, temperatures, …). The first token in each
+    // substitution's range gets `text = sub.originalText` (so the chyron and
+    // the underline-highlighter both see the user's original input) and
+    // `_.alias = sub.lookupWords[0]` (so the lexicon path looks up the right
+    // word). For 1:N substitutions like "110°F" → "110 degrees Fahrenheit",
+    // the trailing covered tokens are display-suppressed (text + whitespace
+    // emptied) but each still gets its own `_.alias` so phoneme generation
+    // produces the full spoken expansion. The first token absorbs the last
+    // covered token's whitespace so concatenating `text + whitespace` over
+    // the surviving tokens still produces the correct spacing.
+    for sub in preprocessedText.surfaceSubstitutions {
+      let coveredIndices = mutableTokens.indices.filter { i in
+        let r = NSRange(mutableTokens[i].tokenRange, in: preprocessedText.text)
+        return sub.modifiedNSRange.location <= r.location
+          && r.location + r.length <= sub.modifiedNSRange.location + sub.modifiedNSRange.length
+      }
+      // Defensive: if NLTagger split the expansion differently than expected
+      // (e.g. it tokenized "110 degrees Fahrenheit" into 4 word tokens
+      // instead of 3), leave the tokens untouched so we don't garble the
+      // output. assertionFailure flags it in debug builds.
+      guard coveredIndices.count == sub.lookupWords.count, let firstIdx = coveredIndices.first else {
+        assertionFailure("surface substitution covered \(coveredIndices.count) tokens but expected \(sub.lookupWords.count) for \(sub.originalText) -> \(sub.lookupWords)")
+        continue
+      }
+      let lastIdx = coveredIndices.last!
+      let stitchedWhitespace = mutableTokens[lastIdx].whitespace
+      mutableTokens[firstIdx].text = sub.originalText
+      mutableTokens[firstIdx].`_`.alias = sub.lookupWords[0]
+      if firstIdx != lastIdx {
+        mutableTokens[firstIdx].whitespace = stitchedWhitespace
+      }
+      for (offset, idx) in coveredIndices.enumerated() where offset > 0 {
+        mutableTokens[idx].text = ""
+        mutableTokens[idx].whitespace = ""
+        mutableTokens[idx].`_`.alias = sub.lookupWords[offset]
       }
     }
 
@@ -654,7 +881,7 @@ final public class EnglishG2P {
     if performPreprocess {
         pre = self.preprocess(text: text)
     } else {
-        pre = (text: text, tokens: [], features: [], abbreviations: [])
+        pre = (text: text, tokens: [], features: [], surfaceSubstitutions: [])
     }
 
     var tokens = tokenize(preprocessedText: pre)
