@@ -570,7 +570,11 @@ final class Lexicon {
                 let tail = num.dropFirst().compactMap { Int(String($0)) }.map { num2Words.convert(Decimal($0)) }.joined(separator: " ")
                 word = "point " + tail
             } else {
-              if let d = Double(num) { word = num2Words.convert(Decimal(d)) }
+              // Build the Decimal directly from the string to avoid
+              // floating-point round-trip artifacts (e.g. "28.81" via
+              // Double becomes 28.80999999999999488, which then gets
+              // spoken digit-by-digit as a long run of nines).
+              if let d = Decimal(string: num) { word = num2Words.convert(d) }
             }
         }
         

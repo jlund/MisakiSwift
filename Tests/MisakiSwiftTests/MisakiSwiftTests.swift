@@ -74,6 +74,21 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   #expect(result.contains("sˈɛnts"))   // "cents" phoneme
 }
 
+// Decimal numbers must be parsed via Decimal(string:), not Double(),
+// to avoid binary float artifacts. "28.81" via Double becomes
+// 28.80999999999999488, which would be spoken digit-by-digit as a long
+// run of nines.
+@Test func testDecimal_PercentageDoesNotRoundTripThroughDouble() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "The score was 28.81%.")
+  #expect(result.contains("twˈɛnti"))  // "twenty"
+  #expect(result.contains("ˈAt"))      // "eight"
+  #expect(result.contains("pˈYnt"))    // "point"
+  #expect(result.contains("wˈʌn"))     // "one"
+  #expect(result.contains("pəɹsˈɛnt")) // "percent"
+  #expect(!result.contains("nˈIn"))    // "nine" must not appear
+}
+
 // Temperature measurements (e.g. "110°F") should be expanded into spoken form
 // before tokenization rather than being passed through to the fallback network.
 @Test func testTemperature_Fahrenheit() async throws {
