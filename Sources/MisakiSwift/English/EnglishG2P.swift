@@ -213,6 +213,47 @@ final public class EnglishG2P {
     (abbrev, expansion, try! NSRegularExpression(pattern: "(?i)\\b\(abbrev)\\.", options: []))
   }
 
+  // Monetary magnitude shorthand (e.g. "$70bn", "£230mn", "€2tn", "$50k").
+  // NLTagger leaves these alone and the entire token slips into the fallback
+  // path, producing audio that drops the number and currency altogether —
+  // "$70bn" reads as "ebb enn". Rewriting at preprocessing time turns the
+  // token into plain words ("70 billion dollars") that the lexicon + Num2Word
+  // path already handles.
+  //
+  // The currency word goes into the rewrite literally — we deliberately don't
+  // route through the existing `token._.currency` path, because that one
+  // appends the currency unit right after the number ("seventy dollars
+  // billion"), giving the wrong word order.
+  //
+  // Plurality: the currency word is always plural here. Even "$1bn" means a
+  // billion units, not one unit ("one billion dollars", not "one billion
+  // dollar"), so we don't replicate the singular/plural switch the currency
+  // retokenization path uses.
+  private static let monetaryCurrencyWords: [Character: String] = [
+    "$": "dollars",
+    "£": "pounds",
+    "€": "euros",
+  ]
+  // Two-letter suffixes must appear before single-letter ones in the
+  // alternation so "70bn" matches `bn`, not `b` + dangling `n`.
+  private static let monetaryMagnitudeWords: [(suffix: String, word: String)] = [
+    ("bn", "billion"),
+    ("mn", "million"),
+    ("tn", "trillion"),
+    ("b",  "billion"),
+    ("m",  "million"),
+    ("t",  "trillion"),
+    ("k",  "thousand"),
+  ]
+  // Capture groups: 1 = currency char, 2 = number (digits/commas/optional
+  // decimal), 3 = magnitude suffix. `\s?` allows the FT/Economist style
+  // "$70 bn". Case-insensitive so "$70BN", "$70Bn" all match.
+  private static let monetaryAbbreviationRegex: NSRegularExpression = {
+    let suffixAlt = monetaryMagnitudeWords.map { $0.suffix }.joined(separator: "|")
+    let pattern = #"([\$£€])([\d,]+(?:\.\d+)?)\s?("# + suffixAlt + #")\b"#
+    return try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+  }()
+
   /// Tracks one preprocessing rewrite (e.g. `"Jr."` → `"Junior"`, or `"110°F"`
   /// → `"110 degrees Fahrenheit"`). Used after tokenization to restore
   /// `token.text` to the original surface form (so the kokoro app's chyron
@@ -301,6 +342,31 @@ final public class EnglishG2P {
           trailingChar: ""
         ))
       }
+    }
+
+    // Monetary magnitude shorthand ("$70bn", "£230mn", "$50k", "€2tn").
+    // Can't overlap temperature matches — temperature requires a `°`, this
+    // pattern requires a currency symbol.
+    for match in monetaryAbbreviationRegex.matches(in: text, options: [], range: nsRange) {
+      guard let originalRange = Range(match.range, in: text),
+            match.numberOfRanges == 4,
+            let currencyRange = Range(match.range(at: 1), in: text),
+            let numberRange = Range(match.range(at: 2), in: text),
+            let suffixRange = Range(match.range(at: 3), in: text) else { continue }
+      if pending.contains(where: { $0.originalRange.overlaps(originalRange) }) { continue }
+      let currencyChar = text[currencyRange].first!
+      guard let currencyWord = monetaryCurrencyWords[currencyChar] else { continue }
+      let numberText = String(text[numberRange])
+      let suffixText = String(text[suffixRange]).lowercased()
+      guard let magnitudeWord = monetaryMagnitudeWords.first(where: { $0.suffix == suffixText })?.word else { continue }
+      let lookupWords = [numberText, magnitudeWord, currencyWord]
+      pending.append(PendingRewrite(
+        originalRange: originalRange,
+        originalSurfaceText: String(text[originalRange]),
+        expansion: lookupWords.joined(separator: " "),
+        lookupWords: lookupWords,
+        trailingChar: ""
+      ))
     }
 
     // End-of-input abbreviations next (they want to keep the trailing period

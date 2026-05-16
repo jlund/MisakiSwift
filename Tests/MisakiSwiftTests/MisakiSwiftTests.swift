@@ -89,6 +89,132 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   #expect(!result.contains("nˈIn"))    // "nine" must not appear
 }
 
+// Monetary magnitude shorthand ("$70bn", "£230mn", "$50k", etc.) gets
+// rewritten at preprocessing time to plain words. Without this rewrite the
+// whole token slips into the fallback path and the audio loses the number
+// and the currency, leaving just a letter spelling of the suffix.
+@Test func testMonetaryAbbreviation_BillionDollars() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "The deficit grew to $70bn last year.")
+  #expect(result.contains("sˈɛvənti")) // "seventy"
+  #expect(result.contains("bˈɪljən"))  // "billion"
+  #expect(result.contains("dˈɑləɹz"))  // "dollars"
+}
+
+@Test func testMonetaryAbbreviation_MillionDollars() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "The fund raised $230mn this quarter.")
+  #expect(result.contains("hˈʌndɹəd"))  // "hundred"
+  #expect(result.contains("θˈɜɹɾi"))    // "thirty"
+  #expect(result.contains("mˈɪljᵊn"))   // "million"
+  #expect(result.contains("dˈɑləɹz"))   // "dollars"
+}
+
+@Test func testMonetaryAbbreviation_ThousandDollars() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "It costs $50k to get started.")
+  #expect(result.contains("fˈɪfti"))   // "fifty"
+  #expect(result.contains("θˈWzᵊnd"))  // "thousand"
+  #expect(result.contains("dˈɑləɹz"))  // "dollars"
+}
+
+@Test func testMonetaryAbbreviation_TrillionPounds() async throws {
+  let englishG2P = EnglishG2P(british: true)
+  let (result, _) = englishG2P.phonemize(text: "The market cap is £2tn now.")
+  #expect(result.contains("tɹˈɪljən"))  // "trillion"
+  #expect(result.contains("pˈWndz"))    // "pounds"
+}
+
+// Single-letter suffixes ("$5b", "$5m", "$5t") must also expand — they're
+// common in US business writing.
+@Test func testMonetaryAbbreviation_SingleLetterSuffix() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (resultB, _) = englishG2P.phonemize(text: "Profit was $5b.")
+  #expect(resultB.contains("bˈɪljən"))
+  #expect(resultB.contains("dˈɑləɹz"))
+
+  let (resultM, _) = englishG2P.phonemize(text: "Profit was $5m.")
+  #expect(resultM.contains("mˈɪljᵊn"))
+  #expect(resultM.contains("dˈɑləɹz"))
+}
+
+// FT/Economist style "$70 bn" with a space between number and suffix must
+// also expand.
+@Test func testMonetaryAbbreviation_OptionalSpaceBeforeSuffix() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "The deficit grew to $70 bn last year.")
+  #expect(result.contains("sˈɛvənti"))
+  #expect(result.contains("bˈɪljən"))
+  #expect(result.contains("dˈɑləɹz"))
+}
+
+// Plain-text "5m" with no currency prefix must NOT be rewritten (it
+// commonly means "5 meters"), and an unsuffixed "$5" must continue to flow
+// through the regular currency-retokenization path unchanged.
+@Test func testMonetaryAbbreviation_NotConfusedByPlainText() async throws {
+  let englishG2P = EnglishG2P(british: false)
+
+  let bare = EnglishG2P.applyAllReplacements(to: "We need 5m of cable.")
+  #expect(bare.substitutions.isEmpty)
+  #expect(bare.text == "We need 5m of cable.")
+
+  let (currencyOnly, _) = englishG2P.phonemize(text: "It costs $5 only.")
+  #expect(currencyOnly.contains("fˈIv"))    // "five"
+  #expect(currencyOnly.contains("dˈɑləɹz")) // "dollars" (existing path)
+}
+
+// Unit-level checks on the substitution metadata mirror the temperature
+// rewrite tests above — the rewrite must capture the full "$70bn" surface
+// form, produce exactly three lookup words, and lowercase the suffix so
+// "$70BN" maps the same way.
+@Test func testMonetaryAbbreviation_SubstitutionMetadata() async throws {
+  let billion = EnglishG2P.applyAllReplacements(to: "Up $70bn this year.")
+  #expect(billion.substitutions.count == 1)
+  #expect(billion.substitutions[0].originalText == "$70bn")
+  #expect(billion.substitutions[0].lookupWords == ["70", "billion", "dollars"])
+
+  let mixedCase = EnglishG2P.applyAllReplacements(to: "Up $70BN this year.")
+  #expect(mixedCase.substitutions.count == 1)
+  #expect(mixedCase.substitutions[0].originalText == "$70BN")
+  #expect(mixedCase.substitutions[0].lookupWords == ["70", "billion", "dollars"])
+
+  let pounds = EnglishG2P.applyAllReplacements(to: "Market cap of £2tn.")
+  #expect(pounds.substitutions.count == 1)
+  #expect(pounds.substitutions[0].originalText == "£2tn")
+  #expect(pounds.substitutions[0].lookupWords == ["2", "trillion", "pounds"])
+
+  let spaced = EnglishG2P.applyAllReplacements(to: "Up $70 bn this year.")
+  #expect(spaced.substitutions.count == 1)
+  #expect(spaced.substitutions[0].originalText == "$70 bn")
+  #expect(spaced.substitutions[0].lookupWords == ["70", "billion", "dollars"])
+}
+
+// The original surface "$70bn" must end up on a single token, and the
+// expansion words must NOT leak into any token's display text. Mirrors
+// testTemperatures_TokenSurfaceTextPreserved.
+@Test func testMonetaryAbbreviation_TokenSurfaceTextPreserved() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "The deficit grew to $70bn last year.")
+
+  #expect(tokens.contains(where: { $0.text == "$70bn" }))
+  #expect(!tokens.contains(where: { $0.text == "billion" }))
+  #expect(!tokens.contains(where: { $0.text == "dollars" }))
+
+  let surfaceToken = tokens.first { $0.text == "$70bn" }
+  #expect(surfaceToken?.`_`.alias == "70")
+  #expect(tokens.contains(where: { $0.text == "" && $0.`_`.alias == "billion" }))
+  #expect(tokens.contains(where: { $0.text == "" && $0.`_`.alias == "dollars" }))
+}
+
+// Reconstruct the chyron string by concatenating `text + whitespace` over
+// the returned tokens — it must equal the user's original input verbatim.
+@Test func testMonetaryAbbreviation_ChyronConcatenation() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "The deficit grew to $70bn last year.")
+  let chyron = tokens.map { $0.text + $0.whitespace }.joined()
+  #expect(chyron == "The deficit grew to $70bn last year.")
+}
+
 // Temperature measurements (e.g. "110°F") should be expanded into spoken form
 // before tokenization rather than being passed through to the fallback network.
 @Test func testTemperature_Fahrenheit() async throws {
