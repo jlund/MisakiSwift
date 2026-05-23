@@ -911,6 +911,14 @@ final public class EnglishG2P {
             currency = nil
           } else if j + 1 == subtokens.count && (i + 1 == tokens.count || tokens[i + 1].tag != .number) {
             token.`_`.currency = currency
+            // The currency expression ends here — clear the variable so a later
+            // number-tagged token doesn't pick up a stale "$". English number
+            // words like "million" / "billion" / "three" come back from
+            // NLTagger tagged .number, so the chain-break above never fires
+            // on them; without this clear, "$818 million (17%)" leaks the $
+            // across "million" + "(" and reattaches it to "17", producing
+            // "...million dollars (17 dollars percent)".
+            currency = nil
           }
         } else if j > 0 && j < subtokens.count - 1 && token.text == "2" {
           let prev = subtokens[j - 1].text

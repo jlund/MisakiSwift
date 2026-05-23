@@ -74,6 +74,62 @@ let texts: [(originalText: String, britishPhonetization: String, americanPhoneit
   #expect(result.contains("sˈɛnts"))   // "cents" phoneme
 }
 
+// The `$` symbol must NOT leak past its own number to a later, unrelated
+// number in the same sentence. English number words like "million" /
+// "billion" / "three" are tagged .number by NLTagger, so the currency
+// chain-break in retokenize() never fires on them; without an explicit
+// clear after attach, "$818 million (17%)" produces "...million dollars
+// (17 dollars percent)" and "$X million, three times" produces "...million
+// dollars, three dollars times".
+//
+// Helper: count occurrences of `needle` in `haystack`. Most existing tests
+// use plain `contains(...)`; these regressions need a count assertion to
+// distinguish "appears once on the legitimate amount" from "leaks onto a
+// second number".
+private func count(_ needle: String, in haystack: String) -> Int {
+  haystack.components(separatedBy: needle).count - 1
+}
+
+@Test func testCurrency_DoesNotLeakAcrossMillionAndParens() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "It made $818 million (17%) from AI.")
+  #expect(result.contains("pəɹsˈɛnt"))         // "percent" still pronounced
+  #expect(count("dˈɑləɹz", in: result) == 1)   // "dollars" attaches once, not to "17"
+}
+
+@Test func testCurrency_DoesNotLeakAcrossCommaToNumberWord() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "It spent $7,723 million, three times as much as before.")
+  #expect(count("dˈɑləɹz", in: result) == 1)   // attaches once on "million", not on "three"
+}
+
+@Test func testCurrency_FullReportedSentence() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(
+    text: "It made $818 million (17%) from AI, and had capital expenditures of of $7,723 million, three times as much capex as before."
+  )
+  #expect(count("dˈɑləɹz", in: result) == 2)   // exactly one per `$X million` group
+  #expect(result.contains("pəɹsˈɛnt"))
+}
+
+@Test func testCurrency_SimpleNoLeakAcrossParens() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "It costs $5 (10% off).")
+  #expect(count("dˈɑləɹz", in: result) == 1)   // not "ten dollars percent"
+  #expect(result.contains("pəɹsˈɛnt"))
+}
+
+// Regression guard: the chain-end clear must not break the existing
+// decimal-currency path. "$5.72" comes back from NLTagger as one
+// .otherWord token, so the attach + clear happens exactly once and
+// both "dollars" and "cents" still come through.
+@Test func testCurrency_DecimalStillProducesDollarsAndCents() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "It cost $5.72 yesterday.")
+  #expect(result.contains("dˈɑləɹz"))
+  #expect(result.contains("sˈɛnts"))
+}
+
 // Decimal numbers must be parsed via Decimal(string:), not Double(),
 // to avoid binary float artifacts. "28.81" via Double becomes
 // 28.80999999999999488, which would be spoken digit-by-digit as a long
