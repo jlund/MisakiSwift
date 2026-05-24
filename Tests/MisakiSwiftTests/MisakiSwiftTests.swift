@@ -630,3 +630,22 @@ private func count(_ needle: String, in haystack: String) -> Int {
     Issue.record("expected a '.' token immediately after the 'Inc' token")
   }
 }
+
+// Place-name pronunciations: "Los" and "Angeles" each fall back to BART/letter
+// spelling when absent from the gold dictionary, producing "Lows Angels".
+// Adding gold entries short-circuits the fallback and yields the canonical
+// /lɔs ˈændʒələs/ pronunciation.
+@Test func testPlaceName_LosAngeles_American() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "Los Angeles California")
+  #expect(result.contains("lˈɔs"))
+  #expect(result.contains("ˈænʤələs"))
+  #expect(result.contains("kˌæləfˈɔɹnjə"))
+}
+
+@Test func testPlaceName_LosAngeles_British() async throws {
+  let englishG2P = EnglishG2P(british: true)
+  let (result, _) = englishG2P.phonemize(text: "Los Angeles California")
+  #expect(result.contains("lˈɒs"))
+  #expect(result.contains("ˈanʤɪləs"))
+}
