@@ -649,3 +649,108 @@ private func count(_ needle: String, in haystack: String) -> Int {
   #expect(result.contains("lˈɒs"))
   #expect(result.contains("ˈanʤɪləs"))
 }
+
+// MARK: - Emoji expansion
+
+// Emoji are expanded into their spoken CLDR names ("sun emoji", "party popper
+// emoji") before tokenization, with the original glyph preserved on a single
+// token. Mirrors the temperature/monetary substitution-metadata tests.
+@Test func testEmoji_SubstitutionMetadata() async throws {
+  let sun = EnglishG2P.applyAllReplacements(to: "☀️ Summer")
+  #expect(sun.substitutions.count == 1)
+  #expect(sun.substitutions[0].originalText == "☀️")
+  #expect(sun.substitutions[0].lookupWords == ["sun", "emoji"])
+  #expect(sun.substitutions[0].isEmojiRun)
+
+  let party = EnglishG2P.applyAllReplacements(to: "party 🎉")
+  #expect(party.substitutions.count == 1)
+  #expect(party.substitutions[0].originalText == "🎉")
+  #expect(party.substitutions[0].lookupWords == ["party", "popper", "emoji"])
+
+  let flag = EnglishG2P.applyAllReplacements(to: "🇺🇸")
+  #expect(flag.substitutions[0].originalText == "🇺🇸")
+  #expect(flag.substitutions[0].lookupWords == ["flag", "United", "States", "emoji"])
+
+  let skin = EnglishG2P.applyAllReplacements(to: "👍🏽")
+  #expect(skin.substitutions[0].originalText == "👍🏽")
+  #expect(skin.substitutions[0].lookupWords == ["thumbs", "up", "medium", "skin", "tone", "emoji"])
+
+  let family = EnglishG2P.applyAllReplacements(to: "👨‍👩‍👧")
+  #expect(family.substitutions[0].originalText == "👨‍👩‍👧")
+  #expect(family.substitutions[0].lookupWords == ["family", "man", "woman", "girl", "emoji"])
+}
+
+// Repeated identical emoji collapse to a spoken count: "❤️❤️❤️" → "3 red heart
+// emoji" (the "3" becomes "three" via the existing number path).
+@Test func testEmoji_RepeatCollapse() async throws {
+  let hearts = EnglishG2P.applyAllReplacements(to: "❤️❤️❤️")
+  #expect(hearts.substitutions.count == 1)
+  #expect(hearts.substitutions[0].originalText == "❤️❤️❤️")
+  #expect(hearts.substitutions[0].lookupWords == ["3", "red", "heart", "emoji"])
+}
+
+// A bare ❤ (no variation selector) resolves to the same name as ❤️.
+@Test func testEmoji_QualifiedAndUnqualifiedResolveSame() async throws {
+  let qualified = EnglishG2P.applyAllReplacements(to: "❤️")
+  let unqualified = EnglishG2P.applyAllReplacements(to: "❤")
+  #expect(qualified.substitutions[0].lookupWords == ["red", "heart", "emoji"])
+  #expect(unqualified.substitutions[0].lookupWords == ["red", "heart", "emoji"])
+}
+
+// Adjacent (no-space) different emoji form ONE run/substitution so the words
+// don't mash together and the chyron stays verbatim.
+@Test func testEmoji_AdjacentRunIsSingleSubstitution() async throws {
+  let run = EnglishG2P.applyAllReplacements(to: "☀️🎉")
+  #expect(run.substitutions.count == 1)
+  #expect(run.substitutions[0].originalText == "☀️🎉")
+  #expect(run.substitutions[0].lookupWords == ["sun", "emoji", "party", "popper", "emoji"])
+}
+
+// The original emoji glyph must end up on a single token; the spoken words must
+// NOT leak into any token's display text. Mirrors the monetary surface test.
+@Test func testEmoji_TokenSurfaceTextPreserved() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "Hello 🎉 world")
+
+  #expect(tokens.contains(where: { $0.text == "🎉" }))
+  #expect(!tokens.contains(where: { $0.text == "party" }))
+  #expect(!tokens.contains(where: { $0.text == "popper" }))
+
+  let surfaceToken = tokens.first { $0.text == "🎉" }
+  #expect(surfaceToken?.`_`.alias == "party")
+  #expect(tokens.contains(where: { $0.text == "" && $0.`_`.alias == "popper" }))
+  #expect(tokens.contains(where: { $0.text == "" && $0.`_`.alias == "emoji" }))
+}
+
+// Reconstruct the chyron by concatenating text + whitespace over the returned
+// tokens — it must equal the user's original input verbatim, emoji and all (the
+// injected pause tokens are invisible).
+@Test func testEmoji_ChyronConcatenation() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let input = "☀️ Summer is here, and it's time to celebrate 🎉"
+  let (_, tokens) = englishG2P.phonemize(text: input)
+  let chyron = tokens.map { $0.text + $0.whitespace }.joined()
+  #expect(chyron == input)
+}
+
+// A small pause is injected around each emoji run as an invisible token
+// (text="" but phonemes=","), so the pause reaches the phoneme stream without
+// polluting the chyron.
+@Test func testEmoji_PauseTokensInjectedButInvisible() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, tokens) = englishG2P.phonemize(text: "Hi 🎉 bye")
+
+  let pauses = tokens.filter { $0.text.isEmpty && $0.phonemes == "," }
+  #expect(pauses.count >= 2)   // one before, one after the run
+  #expect(tokens.map { $0.text + $0.whitespace }.joined() == "Hi 🎉 bye")
+  #expect(result.contains(","))   // the input has no other punctuation
+}
+
+// stripEmoji removes emoji and tidies the leftover whitespace; used by the app
+// when "Pronounce Emoji Characters" is off.
+@Test func testEmoji_StripEmoji() async throws {
+  #expect(EmojiExpansion.stripEmoji("☀️ Summer 🎉") == "Summer")
+  #expect(EmojiExpansion.stripEmoji("a☀️b") == "ab")
+  #expect(EmojiExpansion.stripEmoji("no emoji here") == "no emoji here")
+  #expect(EmojiExpansion.stripEmoji("❤️❤️❤️") == "")
+}

@@ -287,6 +287,10 @@ final public class EnglishG2P {
     /// not. Token ranges come back as Range<String.Index> from NLTagger but
     /// convert losslessly to NSRange against the same text.
     let modifiedNSRange: NSRange
+    /// True only for emoji-run expansions. `tokenize()` keys off this to
+    /// bracket each run with injected pause tokens so the spoken name is set
+    /// off from the surrounding words.
+    var isEmojiRun: Bool = false
   }
 
   static func normalizeAbbreviations(_ text: String) -> String {
@@ -315,6 +319,7 @@ final public class EnglishG2P {
       let expansion: String                        // Written to result for the substitution
       let lookupWords: [String]                    // Goes into SurfaceSubstitution.lookupWords
       let trailingChar: String                     // "" or "." (for end-of-input abbreviations)
+      var isEmojiRun: Bool = false                 // Goes into SurfaceSubstitution.isEmojiRun
     }
 
     var pending: [PendingRewrite] = []
@@ -403,6 +408,23 @@ final public class EnglishG2P {
       }
     }
 
+    // Emoji runs → spoken names ("☀️" → "sun emoji", "❤️❤️❤️" → "3 red heart
+    // emoji"). Each maximal run becomes one substitution whose first restored
+    // token displays the whole run (keeping the chyron verbatim); a small pause
+    // is injected around the run later in tokenize(). Emoji can't overlap the
+    // patterns above (they share no characters), but keep the guard for symmetry.
+    for run in EmojiExpansion.expansions(in: text) {
+      if pending.contains(where: { $0.originalRange.overlaps(run.originalRange) }) { continue }
+      pending.append(PendingRewrite(
+        originalRange: run.originalRange,
+        originalSurfaceText: run.originalText,
+        expansion: run.lookupWords.joined(separator: " "),
+        lookupWords: run.lookupWords,
+        trailingChar: "",
+        isEmojiRun: true
+      ))
+    }
+
     pending.sort(by: { $0.originalRange.lowerBound < $1.originalRange.lowerBound })
 
     var result = ""
@@ -419,7 +441,8 @@ final public class EnglishG2P {
       substitutions.append(SurfaceSubstitution(
         originalText: match.originalSurfaceText,
         lookupWords: match.lookupWords,
-        modifiedNSRange: NSRange(location: modifiedStartUTF16, length: modifiedEndUTF16 - modifiedStartUTF16)
+        modifiedNSRange: NSRange(location: modifiedStartUTF16, length: modifiedEndUTF16 - modifiedStartUTF16),
+        isEmojiRun: match.isEmojiRun
       ))
 
       result.append(match.trailingChar)
@@ -774,6 +797,56 @@ final public class EnglishG2P {
         mutableTokens[idx].whitespace = ""
         mutableTokens[idx].`_`.alias = sub.lookupWords[offset]
       }
+    }
+
+    // Inject a small pause (an invisible "," token) before and after each emoji
+    // run so its spoken name is set off from the surrounding words. We do this
+    // in token space — not by writing punctuation into the rewritten text,
+    // which would corrupt the substitution NSRanges — with tokens that carry
+    // phonemes="," but empty text: they pause the audio (the joined phoneme
+    // string is what reaches the TTS engine) without appearing in the chyron,
+    // and is_head=true stops foldLeft from merging them into a neighbour.
+    let emojiSubs = preprocessedText.surfaceSubstitutions.filter { $0.isEmojiRun }
+    if !emojiSubs.isEmpty {
+      var pauseBefore = Set<Int>()
+      var pauseAfter = Set<Int>()
+      for sub in emojiSubs {
+        let coveredIndices = mutableTokens.indices.filter { i in
+          let r = NSRange(mutableTokens[i].tokenRange, in: preprocessedText.text)
+          return sub.modifiedNSRange.location <= r.location
+            && r.location + r.length <= sub.modifiedNSRange.location + sub.modifiedNSRange.length
+        }
+        if let first = coveredIndices.first { pauseBefore.insert(first) }
+        if let last = coveredIndices.last { pauseAfter.insert(last) }
+      }
+
+      func makePause(at anchor: MToken) -> MToken {
+        MToken(
+          text: "",
+          tokenRange: anchor.tokenRange.lowerBound..<anchor.tokenRange.lowerBound,
+          whitespace: "",
+          phonemes: ",",
+          underscore: Underscore(is_head: true, prespace: false, rating: 4))
+      }
+      // Don't double up against a pause we just injected (e.g. two emoji runs
+      // separated only by a space).
+      func isInjectedPause(_ token: MToken?) -> Bool {
+        guard let token = token else { return false }
+        return token.text.isEmpty && token.phonemes == ","
+      }
+
+      var rebuilt: [MToken] = []
+      rebuilt.reserveCapacity(mutableTokens.count + pauseBefore.count + pauseAfter.count)
+      for (i, token) in mutableTokens.enumerated() {
+        if pauseBefore.contains(i), !isInjectedPause(rebuilt.last) {
+          rebuilt.append(makePause(at: token))
+        }
+        rebuilt.append(token)
+        if pauseAfter.contains(i) {
+          rebuilt.append(makePause(at: token))
+        }
+      }
+      mutableTokens = rebuilt
     }
 
     return mutableTokens

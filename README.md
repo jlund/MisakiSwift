@@ -84,3 +84,28 @@ The package includes pre-trained models and dictionaries:
 - **Silver Dictionary**: Additional pronunciation mappings with slightly lower confidence
 
 These resources are automatically bundled with the package and loaded at runtime.
+
+## Emoji Names
+
+Emoji are expanded into their spoken English names ("☀️" → *"sun emoji"*,
+"❤️❤️❤️" → *"three red heart emoji"*) so they are read aloud rather than passed
+to the fallback network as unknown characters. A small pause is injected around
+each emoji run, and consecutive identical emoji collapse to a spoken count.
+
+The name table (`Resources/emoji_names.json`) is generated from Unicode data:
+
+- **RGI emoji set** — Unicode `emoji-test.txt` (UTS #51), Emoji 16.0
+- **Spoken short names** — CLDR `type="tts"` annotations (CLDR release-46), the
+  same names VoiceOver speaks, pre-normalized to plain space-separated words
+
+Both files are published by Unicode under the **Unicode License v3** (SPDX:
+`Unicode-3.0`), which permits redistribution provided the copyright/permission
+notice is included in documentation. Regenerate the table (a manual, infrequent
+step that requires network access) with:
+
+```sh
+python3 Scripts/generate_emoji_names.py
+```
+
+Bump `EMOJI_VERSION` / `CLDR_RELEASE` in that script to track newer Unicode
+releases.
