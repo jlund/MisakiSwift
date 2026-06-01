@@ -291,6 +291,13 @@ final public class EnglishG2P {
     /// bracket each run with injected pause tokens so the spoken name is set
     /// off from the surrounding words.
     var isEmojiRun: Bool = false
+    /// When an emoji run abuts a word with no space in the original (e.g.
+    /// "sun☀️" / "☀️sun"), `applyAllReplacements` pads the expansion with a
+    /// space so NLTagger doesn't merge the seam into one token. These flags
+    /// tell `tokenize()` to clear the resulting stray whitespace so the chyron
+    /// still renders the user's input verbatim.
+    var padLeft: Bool = false
+    var padRight: Bool = false
   }
 
   static func normalizeAbbreviations(_ text: String) -> String {
@@ -320,6 +327,8 @@ final public class EnglishG2P {
       let lookupWords: [String]                    // Goes into SurfaceSubstitution.lookupWords
       let trailingChar: String                     // "" or "." (for end-of-input abbreviations)
       var isEmojiRun: Bool = false                 // Goes into SurfaceSubstitution.isEmojiRun
+      var padLeft: Bool = false                    // Space-pad the seam to avoid NLTagger merges
+      var padRight: Bool = false
     }
 
     var pending: [PendingRewrite] = []
@@ -415,13 +424,25 @@ final public class EnglishG2P {
     // patterns above (they share no characters), but keep the guard for symmetry.
     for run in EmojiExpansion.expansions(in: text) {
       if pending.contains(where: { $0.originalRange.overlaps(run.originalRange) }) { continue }
+      // If the run abuts a non-space character in the original ("sun☀️",
+      // "☀️sun"), NLTagger would merge the expansion's first/last word into
+      // that neighbour ("sunsun"), throwing off the covered-token count. Pad
+      // the expansion with a space on the glued side; tokenize() clears the
+      // stray whitespace afterward so the chyron stays verbatim.
+      let lower = run.originalRange.lowerBound
+      let upper = run.originalRange.upperBound
+      let padLeft = lower > text.startIndex && !text[text.index(before: lower)].isWhitespace
+      let padRight = upper < text.endIndex && !text[upper].isWhitespace
+      let core = run.lookupWords.joined(separator: " ")
       pending.append(PendingRewrite(
         originalRange: run.originalRange,
         originalSurfaceText: run.originalText,
-        expansion: run.lookupWords.joined(separator: " "),
+        expansion: (padLeft ? " " : "") + core + (padRight ? " " : ""),
         lookupWords: run.lookupWords,
         trailingChar: "",
-        isEmojiRun: true
+        isEmojiRun: true,
+        padLeft: padLeft,
+        padRight: padRight
       ))
     }
 
@@ -442,7 +463,9 @@ final public class EnglishG2P {
         originalText: match.originalSurfaceText,
         lookupWords: match.lookupWords,
         modifiedNSRange: NSRange(location: modifiedStartUTF16, length: modifiedEndUTF16 - modifiedStartUTF16),
-        isEmojiRun: match.isEmojiRun
+        isEmojiRun: match.isEmojiRun,
+        padLeft: match.padLeft,
+        padRight: match.padRight
       ))
 
       result.append(match.trailingChar)
@@ -796,6 +819,16 @@ final public class EnglishG2P {
         mutableTokens[idx].text = ""
         mutableTokens[idx].whitespace = ""
         mutableTokens[idx].`_`.alias = sub.lookupWords[offset]
+      }
+      // Undo the seam pad (see SurfaceSubstitution.padLeft/padRight) so the
+      // chyron renders the user's input verbatim. A left pad leaked onto the
+      // preceding token's trailing whitespace; a right pad got stitched onto
+      // the surface token above.
+      if sub.padLeft, firstIdx > 0 {
+        mutableTokens[firstIdx - 1].whitespace = ""
+      }
+      if sub.padRight {
+        mutableTokens[firstIdx].whitespace = ""
       }
     }
 

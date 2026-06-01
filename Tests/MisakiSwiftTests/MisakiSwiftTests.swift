@@ -754,3 +754,42 @@ private func count(_ needle: String, in haystack: String) -> Int {
   #expect(EmojiExpansion.stripEmoji("no emoji here") == "no emoji here")
   #expect(EmojiExpansion.stripEmoji("❤️❤️❤️") == "")
 }
+
+// An emoji written directly against a word (no space, e.g. "sun☀️") must not
+// merge with it during tokenization. The expansion is space-padded on the
+// glued side so NLTagger keeps the words distinct; the substitution metadata
+// is unchanged and the pad flags record which side(s) were padded.
+@Test func testEmoji_GluedToAdjacentWord() async throws {
+  let trailing = EnglishG2P.applyAllReplacements(to: "the sun☀️")
+  #expect(trailing.substitutions.count == 1)
+  #expect(trailing.substitutions[0].originalText == "☀️")
+  #expect(trailing.substitutions[0].lookupWords == ["sun", "emoji"])
+  #expect(trailing.substitutions[0].padLeft)
+  #expect(!trailing.substitutions[0].padRight)
+  #expect(trailing.text == "the sun sun emoji")
+
+  let leading = EnglishG2P.applyAllReplacements(to: "☀️sun")
+  #expect(!leading.substitutions[0].padLeft)
+  #expect(leading.substitutions[0].padRight)
+  #expect(leading.text == "sun emoji sun")
+
+  let surrounded = EnglishG2P.applyAllReplacements(to: "a☀️b")
+  #expect(surrounded.substitutions[0].padLeft)
+  #expect(surrounded.substitutions[0].padRight)
+  #expect(surrounded.text == "a sun emoji b")
+
+  // Spaced input is left alone (no padding).
+  let spaced = EnglishG2P.applyAllReplacements(to: "the sun ☀️ rises")
+  #expect(!spaced.substitutions[0].padLeft)
+  #expect(!spaced.substitutions[0].padRight)
+}
+
+// Regression for the on-device crash: a glued emoji must phonemize without
+// tripping the covered-token assertion, and the chyron must stay verbatim
+// (the seam pad is cleared). Exercises the full phonemize path (needs Xcode).
+@Test func testEmoji_GluedChyronConcatenation() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let input = "This is the sun☀️"
+  let (_, tokens) = englishG2P.phonemize(text: input)
+  #expect(tokens.map { $0.text + $0.whitespace }.joined() == input)
+}
