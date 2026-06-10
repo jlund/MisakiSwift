@@ -298,6 +298,11 @@ final public class EnglishG2P {
     /// still renders the user's input verbatim.
     var padLeft: Bool = false
     var padRight: Bool = false
+    /// Emoji runs only: indices into `lookupWords` after which `tokenize()`
+    /// injects a comma-strength pause token between group names
+    /// ("sun, and party popper emoji") — the boundary after each non-final
+    /// group's last word. Mirrors `EmojiRun.pauseAfterWordIndices`.
+    var pauseAfterWordIndices: [Int] = []
   }
 
   static func normalizeAbbreviations(_ text: String) -> String {
@@ -329,6 +334,7 @@ final public class EnglishG2P {
       var isEmojiRun: Bool = false                 // Goes into SurfaceSubstitution.isEmojiRun
       var padLeft: Bool = false                    // Space-pad the seam to avoid NLTagger merges
       var padRight: Bool = false
+      var pauseAfterWordIndices: [Int] = []        // Emoji runs: pause boundaries between groups
     }
 
     var pending: [PendingRewrite] = []
@@ -418,10 +424,13 @@ final public class EnglishG2P {
     }
 
     // Emoji runs → spoken names ("☀️" → "sun emoji", "❤️❤️❤️" → "3 red heart
-    // emoji"). Each maximal run becomes one substitution whose first restored
-    // token displays the whole run (keeping the chyron verbatim); a small pause
-    // is injected around the run later in tokenize(). Emoji can't overlap the
-    // patterns above (they share no characters), but keep the guard for symmetry.
+    // emoji", "☀️🎉" → "sun and party popper emoji"). A run may span inline
+    // whitespace between emoji ("❤️ ❤️ ❤️" counts like "❤️❤️❤️"). Each maximal
+    // run becomes one substitution whose first restored token displays the
+    // whole run (keeping the chyron verbatim); small pauses are injected around
+    // the run — and between its group names — later in tokenize(). Emoji can't
+    // overlap the patterns above (they share no characters), but keep the guard
+    // for symmetry.
     for run in EmojiExpansion.expansions(in: text) {
       if pending.contains(where: { $0.originalRange.overlaps(run.originalRange) }) { continue }
       // If the run abuts a non-space character in the original ("sun☀️",
@@ -442,7 +451,8 @@ final public class EnglishG2P {
         trailingChar: "",
         isEmojiRun: true,
         padLeft: padLeft,
-        padRight: padRight
+        padRight: padRight,
+        pauseAfterWordIndices: run.pauseAfterWordIndices
       ))
     }
 
@@ -465,7 +475,8 @@ final public class EnglishG2P {
         modifiedNSRange: NSRange(location: modifiedStartUTF16, length: modifiedEndUTF16 - modifiedStartUTF16),
         isEmojiRun: match.isEmojiRun,
         padLeft: match.padLeft,
-        padRight: match.padRight
+        padRight: match.padRight,
+        pauseAfterWordIndices: match.pauseAfterWordIndices
       ))
 
       result.append(match.trailingChar)
@@ -851,6 +862,14 @@ final public class EnglishG2P {
         }
         if let first = coveredIndices.first { pauseBefore.insert(first) }
         if let last = coveredIndices.last { pauseAfter.insert(last) }
+        // Comma pauses between group names inside the run ("sun, and party
+        // popper emoji"). Guarded like the restoration pass above: only map
+        // word indices to tokens when the 1:1 alignment held.
+        if coveredIndices.count == sub.lookupWords.count {
+          for wordIdx in sub.pauseAfterWordIndices {
+            pauseAfter.insert(coveredIndices[wordIdx])
+          }
+        }
       }
 
       func makePause(at anchor: MToken) -> MToken {

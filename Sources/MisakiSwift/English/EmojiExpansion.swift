@@ -16,7 +16,7 @@ public enum EmojiExpansion {
   /// Variation selector-16: forces emoji presentation. Stripped from both the
   /// table keys (at generation time) and input clusters (here) so `❤` and `❤️`
   /// resolve to the same entry.
-  private static let variationSelector16: Character = "\u{FE0F}"
+  private static let variationSelector16: Unicode.Scalar = "\u{FE0F}"
 
   /// Bundled `{ FE0F-stripped emoji : space-separated spoken name }` table,
   /// loaded once. Mirrors `DataResourcesUtil`'s `Bundle.module` resource path.
@@ -35,7 +35,7 @@ public enum EmojiExpansion {
   /// The canonical lookup key for a grapheme cluster: the cluster with every
   /// U+FE0F removed.
   static func canonicalKey(for cluster: String) -> String {
-    String(cluster.unicodeScalars.filter { $0 != variationSelector16.unicodeScalars.first! })
+    String(cluster.unicodeScalars.filter { $0 != variationSelector16 })
   }
 
   /// The spoken name for a single emoji grapheme cluster, or `nil` if the
@@ -46,65 +46,95 @@ public enum EmojiExpansion {
     names[canonicalKey(for: cluster)]
   }
 
-  /// One maximal run of consecutive emoji (no intervening non-emoji
-  /// characters), already expanded for the surface-substitution machinery.
+  /// One maximal run of emoji — consecutive emoji clusters, optionally
+  /// separated by inline whitespace — already expanded for the
+  /// surface-substitution machinery.
   struct EmojiRun {
-    /// Span of the whole run in the source text. The first restored token
-    /// displays `originalText`, keeping the chyron verbatim.
+    /// Span of the whole run in the source text, including any inline
+    /// whitespace between the run's emoji. The first restored token displays
+    /// `originalText`, keeping the chyron verbatim.
     let originalRange: Range<String.Index>
-    /// The run's glyphs exactly as typed (e.g. `"❤️❤️❤️"`, `"☀️🎉"`).
+    /// The run's glyphs exactly as typed (e.g. `"❤️❤️❤️"`, `"❤️ ❤️"`).
     let originalText: String
     /// One entry per word NLTagger will produce from the expansion, in order.
     /// Repeated emoji collapse to a leading count digit (`"3"` → *"three"* via
-    /// the existing number path); each emoji/group is suffixed with `"emoji"`.
+    /// the existing number path); distinct groups read as a natural list with
+    /// "and" before the final group and a single trailing "emoji"
+    /// (`"☀️🎉"` → *"sun, and party popper emoji"*).
     let lookupWords: [String]
+    /// Indices into `lookupWords` after which `tokenize()` injects a
+    /// comma-strength pause token: the boundary after each non-final group's
+    /// last word (i.e. just before the next name, or before the "and").
+    let pauseAfterWordIndices: [Int]
   }
 
-  /// Find every maximal emoji run in `text`, in order.
+  /// Find every maximal emoji run in `text`, in order. Emoji separated only by
+  /// inline whitespace (spaces, tabs, NBSP — anything whitespace that isn't a
+  /// newline) join the same run, so `"❤️ ❤️ ❤️"` groups exactly like
+  /// `"❤️❤️❤️"`. Newlines break a run.
   static func expansions(in text: String) -> [EmojiRun] {
+    struct Group { let key: String; let name: String; var count: Int }
     var runs: [EmojiRun] = []
     var index = text.startIndex
 
     while index < text.endIndex {
       let clusterEnd = text.index(after: index)
-      guard name(for: String(text[index..<clusterEnd])) != nil else {
+      let cluster = String(text[index..<clusterEnd])
+      guard let firstName = name(for: cluster) else {
         index = clusterEnd
         continue
       }
 
-      // Walk to the end of this run, accumulating (key, name, count) groups so
-      // consecutive identical emoji collapse into a single counted phrase.
-      struct Group { let key: String; let name: String; var count: Int }
-      var groups: [Group] = []
+      // Accumulate (key, name, count) groups so identical emoji — adjacent or
+      // gap-separated — collapse into a single counted phrase. Each extension
+      // step consumes the next emoji cluster, optionally preceded by a gap of
+      // inline whitespace; the gap is only committed into the run if an emoji
+      // actually follows it, so trailing whitespace is never absorbed.
+      var groups = [Group(key: canonicalKey(for: cluster), name: firstName, count: 1)]
       let runStart = index
-      var runEnd = index
-      var cursor = index
-      while cursor < text.endIndex {
-        let end = text.index(after: cursor)
-        let cluster = String(text[cursor..<end])
-        guard let spoken = name(for: cluster) else { break }
-        let key = canonicalKey(for: cluster)
-        if !groups.isEmpty, groups[groups.count - 1].key == key {
+      var runEnd = clusterEnd
+      while runEnd < text.endIndex {
+        var probe = runEnd
+        while probe < text.endIndex, text[probe].isWhitespace, !text[probe].isNewline {
+          probe = text.index(after: probe)
+        }
+        guard probe < text.endIndex else { break }
+        let nextEnd = text.index(after: probe)
+        let nextCluster = String(text[probe..<nextEnd])
+        guard let spoken = name(for: nextCluster) else { break }
+        let key = canonicalKey(for: nextCluster)
+        if groups[groups.count - 1].key == key {
           groups[groups.count - 1].count += 1
         } else {
           groups.append(Group(key: key, name: spoken, count: 1))
         }
-        runEnd = end
-        cursor = end
+        runEnd = nextEnd
       }
 
+      // Natural-list phrasing: "g1, g2, and g3 emoji" — a single trailing
+      // "emoji", "and" before the final group, and a comma-strength pause
+      // (recorded as metadata; tokenize() injects the actual tokens) after
+      // each non-final group. The pause stays before "and" even for two-group
+      // runs: many CLDR names contain a literal "and" ("skull and
+      // crossbones"), and the pause is what keeps the list audible.
       var lookupWords: [String] = []
-      for group in groups {
+      var pauseAfterWordIndices: [Int] = []
+      for (i, group) in groups.enumerated() {
+        if i > 0 {
+          pauseAfterWordIndices.append(lookupWords.count - 1)
+          if i == groups.count - 1 { lookupWords.append("and") }
+        }
         if group.count >= 2 { lookupWords.append("\(group.count)") }
         lookupWords.append(contentsOf: group.name.split(separator: " ").map(String.init))
-        lookupWords.append("emoji")
       }
+      lookupWords.append("emoji")
 
       runs.append(
         EmojiRun(
           originalRange: runStart..<runEnd,
           originalText: String(text[runStart..<runEnd]),
-          lookupWords: lookupWords))
+          lookupWords: lookupWords,
+          pauseAfterWordIndices: pauseAfterWordIndices))
       index = runEnd
     }
 

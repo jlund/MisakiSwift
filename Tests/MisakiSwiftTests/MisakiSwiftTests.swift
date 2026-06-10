@@ -661,6 +661,7 @@ private func count(_ needle: String, in haystack: String) -> Int {
   #expect(sun.substitutions[0].originalText == "☀️")
   #expect(sun.substitutions[0].lookupWords == ["sun", "emoji"])
   #expect(sun.substitutions[0].isEmojiRun)
+  #expect(sun.substitutions[0].pauseAfterWordIndices.isEmpty)   // single group → no interior pauses
 
   let party = EnglishG2P.applyAllReplacements(to: "party 🎉")
   #expect(party.substitutions.count == 1)
@@ -687,6 +688,7 @@ private func count(_ needle: String, in haystack: String) -> Int {
   #expect(hearts.substitutions.count == 1)
   #expect(hearts.substitutions[0].originalText == "❤️❤️❤️")
   #expect(hearts.substitutions[0].lookupWords == ["3", "red", "heart", "emoji"])
+  #expect(hearts.substitutions[0].pauseAfterWordIndices.isEmpty)
 }
 
 // A bare ❤ (no variation selector) resolves to the same name as ❤️.
@@ -697,13 +699,15 @@ private func count(_ needle: String, in haystack: String) -> Int {
   #expect(unqualified.substitutions[0].lookupWords == ["red", "heart", "emoji"])
 }
 
-// Adjacent (no-space) different emoji form ONE run/substitution so the words
-// don't mash together and the chyron stays verbatim.
+// Adjacent (no-space) different emoji form ONE run/substitution, read as a
+// natural list: "sun, and party popper emoji" — single trailing "emoji", "and"
+// before the final name, pause boundary recorded after each non-final group.
 @Test func testEmoji_AdjacentRunIsSingleSubstitution() async throws {
   let run = EnglishG2P.applyAllReplacements(to: "☀️🎉")
   #expect(run.substitutions.count == 1)
   #expect(run.substitutions[0].originalText == "☀️🎉")
-  #expect(run.substitutions[0].lookupWords == ["sun", "emoji", "party", "popper", "emoji"])
+  #expect(run.substitutions[0].lookupWords == ["sun", "and", "party", "popper", "emoji"])
+  #expect(run.substitutions[0].pauseAfterWordIndices == [0])   // pause after "sun"
 }
 
 // The original emoji glyph must end up on a single token; the spoken words must
@@ -790,6 +794,125 @@ private func count(_ needle: String, in haystack: String) -> Int {
 @Test func testEmoji_GluedChyronConcatenation() async throws {
   let englishG2P = EnglishG2P(british: false)
   let input = "This is the sun☀️"
+  let (_, tokens) = englishG2P.phonemize(text: input)
+  #expect(tokens.map { $0.text + $0.whitespace }.joined() == input)
+}
+
+// Identical emoji separated only by spaces group exactly like an adjacent run:
+// "❤️ ❤️ ❤️" → one substitution, "three red heart emoji".
+@Test func testEmoji_SpaceMergedIdenticalRun() async throws {
+  let hearts = EnglishG2P.applyAllReplacements(to: "❤️ ❤️ ❤️")
+  #expect(hearts.substitutions.count == 1)
+  #expect(hearts.substitutions[0].originalText == "❤️ ❤️ ❤️")
+  #expect(hearts.substitutions[0].lookupWords == ["3", "red", "heart", "emoji"])
+  #expect(hearts.substitutions[0].pauseAfterWordIndices.isEmpty)
+  #expect(hearts.text == "3 red heart emoji")
+}
+
+// Distinct emoji separated by spaces merge into the same natural-list run as
+// their adjacent counterpart — spacing in the input must not change the audio.
+@Test func testEmoji_SpaceMergedDistinctRun() async throws {
+  let spaced = EnglishG2P.applyAllReplacements(to: "🤣 🎉 🤗")
+  let adjacent = EnglishG2P.applyAllReplacements(to: "🤣🎉🤗")
+  #expect(spaced.substitutions.count == 1)
+  #expect(spaced.substitutions[0].originalText == "🤣 🎉 🤗")
+  #expect(spaced.substitutions[0].lookupWords == [
+    "rolling", "on", "the", "floor", "laughing",
+    "party", "popper",
+    "and", "smiling", "face", "with", "open", "hands",
+    "emoji",
+  ])
+  // Pause after "laughing" and after "popper" (just before the "and").
+  #expect(spaced.substitutions[0].pauseAfterWordIndices == [4, 6])
+  #expect(spaced.substitutions[0].lookupWords == adjacent.substitutions[0].lookupWords)
+  #expect(spaced.substitutions[0].pauseAfterWordIndices == adjacent.substitutions[0].pauseAfterWordIndices)
+}
+
+// A repeated-emoji count composes with the list phrasing: the counted group is
+// one list item ("two red heart, and party popper emoji").
+@Test func testEmoji_CountComposesWithList() async throws {
+  for input in ["❤️❤️🎉", "❤️ ❤️ 🎉"] {
+    let run = EnglishG2P.applyAllReplacements(to: input)
+    #expect(run.substitutions.count == 1)
+    #expect(run.substitutions[0].lookupWords == ["2", "red", "heart", "and", "party", "popper", "emoji"])
+    #expect(run.substitutions[0].pauseAfterWordIndices == [2])   // pause after "heart"
+  }
+}
+
+// Newlines break a run — emoji on separate lines are separate thoughts and
+// must not collapse into one counted phrase.
+@Test func testEmoji_NewlineDoesNotMerge() async throws {
+  for input in ["❤️\n❤️", "❤️ \n ❤️"] {
+    let hearts = EnglishG2P.applyAllReplacements(to: input)
+    #expect(hearts.substitutions.count == 2)
+    #expect(hearts.substitutions[0].lookupWords == ["red", "heart", "emoji"])
+    #expect(hearts.substitutions[1].lookupWords == ["red", "heart", "emoji"])
+  }
+}
+
+// Any inline-whitespace gap merges: multiple spaces, tabs, NBSP.
+@Test func testEmoji_WhitespaceVariantsMerge() async throws {
+  for input in ["❤️  ❤️", "❤️\t❤️", "❤️\u{00A0}❤️"] {
+    let hearts = EnglishG2P.applyAllReplacements(to: input)
+    #expect(hearts.substitutions.count == 1)
+    #expect(hearts.substitutions[0].originalText == input)
+    #expect(hearts.substitutions[0].lookupWords == ["2", "red", "heart", "emoji"])
+  }
+}
+
+// The gap lookahead only absorbs whitespace when another emoji follows — the
+// run's range must end at the last glyph, leaving surrounding spaces alone.
+@Test func testEmoji_TrailingGapNotAbsorbed() async throws {
+  let run = EnglishG2P.applyAllReplacements(to: "a ❤️ ❤️ b")
+  #expect(run.substitutions.count == 1)
+  #expect(run.substitutions[0].originalText == "❤️ ❤️")
+  #expect(!run.substitutions[0].padLeft)
+  #expect(!run.substitutions[0].padRight)
+}
+
+// A space-merged run glued to neighbouring words pads both seams, like the
+// single-emoji glued case.
+@Test func testEmoji_GluedAndSpacedCombo() async throws {
+  let run = EnglishG2P.applyAllReplacements(to: "sun☀️ ☀️rise")
+  #expect(run.substitutions.count == 1)
+  #expect(run.substitutions[0].originalText == "☀️ ☀️")
+  #expect(run.substitutions[0].lookupWords == ["2", "sun", "emoji"])
+  #expect(run.substitutions[0].padLeft)
+  #expect(run.substitutions[0].padRight)
+  #expect(run.text == "sun 2 sun emoji rise")
+}
+
+// A space-merged run round-trips through the full phonemize path: the whole
+// run (interior space included) lands on one token and the chyron stays
+// verbatim. Exercises the full phonemize path (needs Xcode).
+@Test func testEmoji_SpacedRunChyron() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let input = "a ❤️ ❤️ b"
+  let (_, tokens) = englishG2P.phonemize(text: input)
+  #expect(tokens.map { $0.text + $0.whitespace }.joined() == input)
+  #expect(tokens.contains(where: { $0.text == "❤️ ❤️" }))
+}
+
+// A three-group run gets pauses at every boundary — before the run, after each
+// non-final group, and after the run (4 total; the input has no other
+// punctuation) — and the "and" flows through the alias path. Exercises the
+// full phonemize path (needs Xcode).
+@Test func testEmoji_InteriorPausesAndAnd() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let input = "Hi 🤣 🎉 🤗 bye"
+  let (_, tokens) = englishG2P.phonemize(text: input)
+
+  let pauses = tokens.filter { $0.text.isEmpty && $0.phonemes == "," }
+  #expect(pauses.count == 4)
+  #expect(tokens.map { $0.text + $0.whitespace }.joined() == input)
+  #expect(tokens.contains(where: { $0.text == "" && $0.`_`.alias == "and" }))
+}
+
+// Glued + space-merged combined must still reconstruct the chyron verbatim
+// through phonemize. Exercises the full phonemize path (needs Xcode).
+@Test func testEmoji_GluedSpacedChyron() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let input = "sun☀️ ☀️rise"
   let (_, tokens) = englishG2P.phonemize(text: input)
   #expect(tokens.map { $0.text + $0.whitespace }.joined() == input)
 }
