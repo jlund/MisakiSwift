@@ -213,12 +213,12 @@ final public class EnglishG2P {
     (abbrev, expansion, try! NSRegularExpression(pattern: "(?i)\\b\(abbrev)\\.", options: []))
   }
 
-  // Monetary magnitude shorthand (e.g. "$70bn", "£230mn", "€2tn", "$50k").
-  // NLTagger leaves these alone and the entire token slips into the fallback
-  // path, producing audio that drops the number and currency altogether —
-  // "$70bn" reads as "ebb enn". Rewriting at preprocessing time turns the
-  // token into plain words ("70 billion dollars") that the lexicon + Num2Word
-  // path already handles.
+  // Monetary magnitude shorthand (e.g. "$70bn", "£230mn", "€2tn", "$50k",
+  // "C$70bn"). NLTagger leaves these alone and the entire token slips into
+  // the fallback path, producing audio that drops the number and currency
+  // altogether — "$70bn" reads as "ebb enn". Rewriting at preprocessing time
+  // turns the token into plain words ("70 billion dollars") that the lexicon
+  // + Num2Word path already handles.
   //
   // The currency word goes into the rewrite literally — we deliberately don't
   // route through the existing `token._.currency` path, because that one
@@ -229,10 +229,18 @@ final public class EnglishG2P {
   // billion units, not one unit ("one billion dollars", not "one billion
   // dollar"), so we don't replicate the singular/plural switch the currency
   // retokenization path uses.
-  private static let monetaryCurrencyWords: [Character: String] = [
-    "$": "dollars",
-    "£": "pounds",
-    "€": "euros",
+  //
+  // Multi-character symbols ("C$70bn", "A$5m") must precede the bare "$" in
+  // this list so the regex alternation matches the full symbol rather than a
+  // bare "$" that leaves the letter prefix glued to the expansion's first
+  // word (which merges into one NLTagger token and breaks the covered-token
+  // alignment in tokenize()).
+  private static let monetaryCurrencyWords: [(symbol: String, words: [String])] = [
+    ("C$", ["Canadian", "dollars"]),
+    ("A$", ["Australian", "dollars"]),
+    ("$", ["dollars"]),
+    ("£", ["pounds"]),
+    ("€", ["euros"]),
   ]
   // Two-letter suffixes must appear before single-letter ones in the
   // alternation so "70bn" matches `bn`, not `b` + dangling `n`.
@@ -245,12 +253,15 @@ final public class EnglishG2P {
     ("t",  "trillion"),
     ("k",  "thousand"),
   ]
-  // Capture groups: 1 = currency char, 2 = number (digits/commas/optional
+  // Capture groups: 1 = currency symbol, 2 = number (digits/commas/optional
   // decimal), 3 = magnitude suffix. `\s?` allows the FT/Economist style
   // "$70 bn". Case-insensitive so "$70BN", "$70Bn" all match.
   private static let monetaryAbbreviationRegex: NSRegularExpression = {
+    let symbolAlt = monetaryCurrencyWords
+      .map { NSRegularExpression.escapedPattern(for: $0.symbol) }
+      .joined(separator: "|")
     let suffixAlt = monetaryMagnitudeWords.map { $0.suffix }.joined(separator: "|")
-    let pattern = #"([\$£€])([\d,]+(?:\.\d+)?)\s?("# + suffixAlt + #")\b"#
+    let pattern = "(" + symbolAlt + #")([\d,]+(?:\.\d+)?)\s?("# + suffixAlt + #")\b"#
     return try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
   }()
 
@@ -374,18 +385,30 @@ final public class EnglishG2P {
             let numberRange = Range(match.range(at: 2), in: text),
             let suffixRange = Range(match.range(at: 3), in: text) else { continue }
       if pending.contains(where: { $0.originalRange.overlaps(originalRange) }) { continue }
-      let currencyChar = text[currencyRange].first!
-      guard let currencyWord = monetaryCurrencyWords[currencyChar] else { continue }
+      let symbolText = String(text[currencyRange]).uppercased()
+      guard let currencyWords = monetaryCurrencyWords.first(where: { $0.symbol == symbolText })?.words else { continue }
       let numberText = String(text[numberRange])
       let suffixText = String(text[suffixRange]).lowercased()
       guard let magnitudeWord = monetaryMagnitudeWords.first(where: { $0.suffix == suffixText })?.word else { continue }
-      let lookupWords = [numberText, magnitudeWord, currencyWord]
+      let lookupWords = [numberText, magnitudeWord] + currencyWords
+      // If the match abuts a non-space character in the original (e.g. the
+      // "X" in "X$70bn"), NLTagger would merge the expansion's first/last
+      // word into that neighbour ("X70"), throwing off the covered-token
+      // alignment in tokenize(). Pad the glued side with a space, exactly
+      // like the emoji-run rewrite below; tokenize() clears the stray
+      // whitespace afterward so the chyron stays verbatim.
+      let padLeft = originalRange.lowerBound > text.startIndex
+        && !text[text.index(before: originalRange.lowerBound)].isWhitespace
+      let padRight = originalRange.upperBound < text.endIndex
+        && !text[originalRange.upperBound].isWhitespace
       pending.append(PendingRewrite(
         originalRange: originalRange,
         originalSurfaceText: String(text[originalRange]),
-        expansion: lookupWords.joined(separator: " "),
+        expansion: (padLeft ? " " : "") + lookupWords.joined(separator: " ") + (padRight ? " " : ""),
         lookupWords: lookupWords,
-        trailingChar: ""
+        trailingChar: "",
+        padLeft: padLeft,
+        padRight: padRight
       ))
     }
 

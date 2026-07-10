@@ -271,6 +271,61 @@ private func count(_ needle: String, in haystack: String) -> Int {
   #expect(chyron == "The deficit grew to $70bn last year.")
 }
 
+// Regression: "C$70bn" (Canadian dollars). The old regex matched only the
+// bare "$70bn", leaving "C" glued to the expansion's "70" — NLTagger
+// tokenized "C70" as one word, so the substitution's three lookup words
+// covered only two tokens and tokenize() tripped its alignment assertion.
+// "C$" (and "A$") are now currency symbols in their own right.
+@Test func testMonetaryAbbreviation_CanadianDollars_SubstitutionMetadata() async throws {
+  let canadian = EnglishG2P.applyAllReplacements(to: "Canada is ready for its C$70bn investment.")
+  #expect(canadian.text == "Canada is ready for its 70 billion Canadian dollars investment.")
+  #expect(canadian.substitutions.count == 1)
+  #expect(canadian.substitutions[0].originalText == "C$70bn")
+  #expect(canadian.substitutions[0].lookupWords == ["70", "billion", "Canadian", "dollars"])
+  #expect(!canadian.substitutions[0].padLeft)
+  #expect(!canadian.substitutions[0].padRight)
+
+  let australian = EnglishG2P.applyAllReplacements(to: "It sold for A$5m at auction.")
+  #expect(australian.substitutions.count == 1)
+  #expect(australian.substitutions[0].originalText == "A$5m")
+  #expect(australian.substitutions[0].lookupWords == ["5", "million", "Australian", "dollars"])
+}
+
+// An unrecognized letter glued to the currency symbol ("X$70bn") must not
+// break token alignment either: the expansion gets space-padded on the glued
+// side (mirroring the emoji-run seam padding) and the pad flags let
+// tokenize() restore the chyron verbatim.
+@Test func testMonetaryAbbreviation_GluedPrefixPadsSeam() async throws {
+  let glued = EnglishG2P.applyAllReplacements(to: "Up X$70bn this year.")
+  #expect(glued.text == "Up X 70 billion dollars this year.")
+  #expect(glued.substitutions.count == 1)
+  #expect(glued.substitutions[0].originalText == "$70bn")
+  #expect(glued.substitutions[0].lookupWords == ["70", "billion", "dollars"])
+  #expect(glued.substitutions[0].padLeft)
+  #expect(!glued.substitutions[0].padRight)
+}
+
+// End-to-end repro of the crash input. Before the fix, phonemize() hit the
+// covered-token assertion in tokenize(). Requires Xcode test host (MLX).
+@Test func testMonetaryAbbreviation_CanadianDollars() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, tokens) = englishG2P.phonemize(text: "Canada is ready for its C$70bn investment.")
+  #expect(result.contains("bˈɪljən"))  // "billion"
+  #expect(result.contains("dˈɑləɹz")) // "dollars"
+  let chyron = tokens.map { $0.text + $0.whitespace }.joined()
+  #expect(chyron == "Canada is ready for its C$70bn investment.")
+  #expect(tokens.contains(where: { $0.text == "C$70bn" }))
+  #expect(!tokens.contains(where: { $0.text == "Canadian" }))
+}
+
+// Chyron stays verbatim when a glued prefix forced a seam pad.
+@Test func testMonetaryAbbreviation_GluedPrefixChyron() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (_, tokens) = englishG2P.phonemize(text: "Up X$70bn this year.")
+  let chyron = tokens.map { $0.text + $0.whitespace }.joined()
+  #expect(chyron == "Up X$70bn this year.")
+}
+
 // Temperature measurements (e.g. "110°F") should be expanded into spoken form
 // before tokenization rather than being passed through to the fallback network.
 @Test func testTemperature_Fahrenheit() async throws {
