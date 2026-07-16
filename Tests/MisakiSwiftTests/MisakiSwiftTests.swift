@@ -705,6 +705,21 @@ private func count(_ needle: String, in haystack: String) -> Int {
   #expect(result.contains("ˈanʤɪləs"))
 }
 
+// "capita" is absent from the gold dictionaries, so it falls back to the BART
+// network, which produces /kəˈpiːtə/ ("capeeta"). Gold entries derived from
+// "capital" restore the canonical /ˈkæpɪtə/.
+@Test func testWord_PerCapita_American() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "These figures were adjusted on a per capita basis.")
+  #expect(result.contains("kˈæpəTə"))
+}
+
+@Test func testWord_PerCapita_British() async throws {
+  let englishG2P = EnglishG2P(british: true)
+  let (result, _) = englishG2P.phonemize(text: "These figures were adjusted on a per capita basis.")
+  #expect(result.contains("kˈapɪtə"))
+}
+
 // MARK: - Emoji expansion
 
 // Emoji are expanded into their spoken CLDR names ("sun emoji", "party popper
