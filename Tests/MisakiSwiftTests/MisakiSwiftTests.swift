@@ -139,7 +139,7 @@ private func count(_ needle: String, in haystack: String) -> Int {
   let (result, _) = englishG2P.phonemize(text: "The score was 28.81%.")
   #expect(result.contains("twˈɛnti"))  // "twenty"
   #expect(result.contains("ˈAt"))      // "eight"
-  #expect(result.contains("pˈYnt"))    // "point"
+  #expect(result.contains("pYnt"))     // "point" (the number path deliberately destresses it)
   #expect(result.contains("wˈʌn"))     // "one"
   #expect(result.contains("pəɹsˈɛnt")) // "percent"
   #expect(!result.contains("nˈIn"))    // "nine" must not appear
@@ -161,7 +161,7 @@ private func count(_ needle: String, in haystack: String) -> Int {
   let englishG2P = EnglishG2P(british: false)
   let (result, _) = englishG2P.phonemize(text: "The fund raised $230mn this quarter.")
   #expect(result.contains("hˈʌndɹəd"))  // "hundred"
-  #expect(result.contains("θˈɜɹɾi"))    // "thirty"
+  #expect(result.contains("θˈɜɹTi"))    // "thirty" (phonemize output maps the flap ɾ to T)
   #expect(result.contains("mˈɪljᵊn"))   // "million"
   #expect(result.contains("dˈɑləɹz"))   // "dollars"
 }
