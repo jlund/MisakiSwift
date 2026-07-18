@@ -285,3 +285,37 @@ private func placeholder(_ text: String) -> String {
   #expect(placeholder(linkOnce) == linkOnce)
 }
 
+// MARK: - Full-pipeline tests (Xcode/xcodebuild only — MLX metallib crashes
+// under CLI `swift test`)
+
+@Test func testWebAddressPhonemize_GoogleDotCom() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let spoken = WebAddressExpansion.speakAddresses(in: "Check out https://www.google.com for details.")
+  let (result, _) = englishG2P.phonemize(text: spoken)
+  #expect(result.contains("ɡˈuɡᵊl dˈɑt kˈɑm"))
+}
+
+// Dotted capitals must ride the M.R.C.S. acronym path: joined letter names,
+// no determiner-schwa ("uh") and no stray pauses.
+@Test func testWebAddressPhonemize_SpelledTLD() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let spoken = WebAddressExpansion.speakAddresses(in: "The form is at example.ca today.")
+  let (result, _) = englishG2P.phonemize(text: spoken)
+  #expect(result.contains("ɪɡzˈæmpəl dˈɑt sˌiˈA"))
+}
+
+@Test func testWebAddressPhonemize_Email() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let spoken = WebAddressExpansion.speakAddresses(in: "Email josh@example.com now.")
+  let (result, _) = englishG2P.phonemize(text: spoken)
+  #expect(result.contains("æt ɪɡzˈæmpəl dˈɑt kˈɑm"))
+}
+
+// "gov" rides the new gold entry instead of the fallback network.
+@Test func testWebAddressPhonemize_GovGoldEntry() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let spoken = WebAddressExpansion.speakAddresses(in: "Forms live at irs.gov today.")
+  let (result, _) = englishG2P.phonemize(text: spoken)
+  #expect(result.contains("dˈɑt ɡˈʌv"))
+}
+
