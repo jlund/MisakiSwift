@@ -720,6 +720,21 @@ private func count(_ needle: String, in haystack: String) -> Int {
   #expect(result.contains("kˈapɪtə"))
 }
 
+// Words expanded from a multi-word surface substitution ("$230mn" →
+// "230 million dollars") are display-suppressed (text and whitespace
+// emptied) so the chyron stays verbatim — but the phoneme string reused
+// that emptied whitespace as its word separator, gluing the expansion and
+// the following word together ("…θˈɜɹTi mˈɪljᵊndˈɑləɹzðɪs…"). The
+// suppressed tokens (and the word after a space-separated substitution)
+// carry prespace, which the final phoneme join turns back into spaces.
+@Test func testMonetaryAbbreviation_PhonemeSeamsStaySpaced() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, tokens) = englishG2P.phonemize(text: "The fund raised $230mn this quarter.")
+  #expect(result.contains("θˈɜɹTi mˈɪljᵊn dˈɑləɹz ðɪs kwˈɔɹTəɹ"))
+  let chyron = tokens.map { $0.text + $0.whitespace }.joined()
+  #expect(chyron == "The fund raised $230mn this quarter.")
+}
+
 // MARK: - Emoji expansion
 
 // Emoji are expanded into their spoken CLDR names ("sun emoji", "party popper

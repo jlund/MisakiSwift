@@ -853,6 +853,16 @@ final public class EnglishG2P {
         mutableTokens[idx].text = ""
         mutableTokens[idx].whitespace = ""
         mutableTokens[idx].`_`.alias = sub.lookupWords[offset]
+        // The emptied whitespace also served as the phoneme join's word
+        // separator; prespace tells the join to restore the boundary without
+        // affecting the chyron.
+        mutableTokens[idx].`_`.prespace = true
+      }
+      // The stitched whitespace renders after the *first* token's phonemes,
+      // so the word following a space-separated substitution needs its
+      // boundary restored the same way.
+      if firstIdx != lastIdx, !stitchedWhitespace.isEmpty, lastIdx + 1 < mutableTokens.count {
+        mutableTokens[lastIdx + 1].`_`.prespace = true
       }
       // Undo the seam pad (see SurfaceSubstitution.padLeft/padRight) so the
       // chyron renders the user's input verbatim. A left pad leaked onto the
@@ -1013,12 +1023,14 @@ final public class EnglishG2P {
       var subtokens: [MToken] = []
       if needsSplit {
         let parts = subtokenize(word: token.text)
-        subtokens = parts.map { part in
+        subtokens = parts.enumerated().map { (k, part) in
           let t = MToken(copying: token)
           t.text = part
           t.whitespace = ""
           t.`_`.is_head = true
-          t.`_`.prespace = false
+          // Keep a substitution-restored word boundary (see tokenize) on the
+          // leading piece; interior pieces of a split word never get one.
+          t.`_`.prespace = k == 0 ? token.`_`.prespace : false
           return t
         }
       } else {
@@ -1196,7 +1208,17 @@ final public class EnglishG2P {
       }
     }
 
-    let result = finalTokens.map { ( $0.phonemes ?? self.unk ) + $0.whitespace }.joined()
+    var result = ""
+    for token in finalTokens {
+      let phonemes = token.phonemes ?? self.unk
+      if token.`_`.prespace,
+         !phonemes.isEmpty,
+         !result.isEmpty,
+         !(result.last?.isWhitespace ?? false) {
+        result += " "
+      }
+      result += phonemes + token.whitespace
+    }
     return (result, finalTokens)
   }
 }
