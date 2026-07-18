@@ -178,6 +178,22 @@ private func placeholder(_ text: String) -> String {
     == "example dot com slash download, and more")
 }
 
+// When a path exceeds the budget, digit-only segments (date scaffolding,
+// numeric IDs) are dropped first so the budget reaches the slug — the part a
+// listener actually wants.
+@Test func testWebAddress_DigitSegmentsDroppedForSlug() async throws {
+  #expect(natural("https://www.nytimes.com/2026/07/14/dining/restaurant-review-ambassadors-clubhouse-nyc.html")
+    == "nytimes dot com slash dining slash restaurant review ambassadors clubhouse N.Y.C dot H.T.M.L, and more")
+  #expect(natural("blog.example.com/2026/07/14/my-first-post")
+    == "blog dot example dot com slash my first post, and more")
+}
+
+// Digit segments keep their place when the whole path fits the budget.
+@Test func testWebAddress_DigitSegmentsKeptWhenTheyFit() async throws {
+  #expect(natural("example.com/2026/07/report")
+    == "example dot com slash 2026 slash 07 slash report")
+}
+
 // MARK: Emails
 
 @Test func testWebAddress_EmailBasic() async throws {

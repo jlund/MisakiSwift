@@ -302,7 +302,11 @@ public enum WebAddressExpansion {
 
   /// Path budget: at most this many segments, and at most this many spoken
   /// words across them, before capping with "and more". Hosts always read in
-  /// full — they're the identity of the address.
+  /// full — they're the identity of the address. When a path exceeds the
+  /// budget, digit-only segments (date scaffolding, numeric IDs) are dropped
+  /// first: in "/2026/07/14/dining/restaurant-review-….html" the slug at the
+  /// end is the part a listener actually wants, and reading three date
+  /// segments would otherwise consume the whole budget before reaching it.
   private static let maxPathSegments = 3
   private static let maxPathWords = 12
 
@@ -323,10 +327,18 @@ public enum WebAddressExpansion {
     }
     words.append(host.joined(separator: " dot "))
 
+    var segments = parsed.pathSegments
+    var droppedDigitSegments = false
+    if !fitsBudgets(segments) {
+      let filtered = segments.filter { !isDigitsOnly($0) }
+      droppedDigitSegments = filtered.count < segments.count
+      segments = filtered
+    }
+
     var emitted = 0
     var pathWords = 0
     var truncated = false
-    for segment in parsed.pathSegments {
+    for segment in segments {
       guard emitted < maxPathSegments, let spoken = speakableSegment(segment) else {
         truncated = true
         break
@@ -343,8 +355,27 @@ public enum WebAddressExpansion {
     }
 
     var result = words.filter { !$0.isEmpty }.joined(separator: " ")
-    if parsed.droppedContent || truncated { result += ", and more" }
+    if parsed.droppedContent || truncated || droppedDigitSegments { result += ", and more" }
     return result
+  }
+
+  /// Whether the whole path reads within the caps as-is (all segments
+  /// speakable, segment and word budgets respected). When it does, digit
+  /// segments keep their place — dates are harmless at small scale.
+  private static func fitsBudgets(_ segments: [String]) -> Bool {
+    guard segments.count <= maxPathSegments else { return false }
+    var words = 0
+    for segment in segments {
+      guard let spoken = speakableSegment(segment) else { return false }
+      words += spoken.split(separator: " ").count
+      if words > maxPathWords { return false }
+    }
+    return true
+  }
+
+  /// Digit-bearing with no letters: "2026", "07", "4.2", "12345".
+  private static func isDigitsOnly(_ segment: String) -> Bool {
+    segment.contains(where: \.isNumber) && !segment.contains(where: \.isLetter)
   }
 
   /// The host's last label: a word for word TLDs, spelled for initialism
@@ -371,7 +402,8 @@ public enum WebAddressExpansion {
         if run.first!.isLetter && run.count >= 5 && !isWordish(run) { return nil }
       }
     }
-    return spokenSegment(segment)
+    let spoken = spokenSegment(segment)
+    return spoken.isEmpty ? nil : spoken
   }
 
   /// "report.pdf" → "report dot P.D.F"; parts between dots render via
