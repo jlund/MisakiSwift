@@ -138,9 +138,34 @@ final class Lexicon {
       let num = getNumber(word, currency: token.`_`.currency, is_head: token.`_`.is_head, num_flags: token.`_`.num_flags)
       return (Lexicon.applyStress(num.0, stress: token.`_`.stress), num.1)
     } else if !word.unicodeScalars.allSatisfy({ Lexicon.lexiconOrdinals.contains(Int($0.value)) }) {
+      return accentedTranscription(word, token: token, stress: stress, ctx: ctx)
+    }
+
+    return (nil, nil)
+  }
+
+  /// Accented Latin words can never match the ASCII-keyed dictionaries
+  /// directly. Try the curated loanword table first (résumé, jalapeño), then
+  /// retry the lookup with diacritics folded away so café→cafe and
+  /// façade→facade land on their real entries. Words that remain unknown
+  /// (Nariño) return nil and proceed to the fallback network, which respells
+  /// them itself.
+  private func accentedTranscription(_ word: String, token: MToken, stress: Double?, ctx: TokenContext) -> (String?, Int?) {
+    if let loanword = AccentedLatin.loanwords[word.lowercased()] {
+      let phoneme = british ? loanword.gb : loanword.us
+      return (Lexicon.applyStress(appendCurrency(phoneme, currency: token.`_`.currency), stress: token.`_`.stress), 4)
+    }
+
+    let folded = AccentedLatin.foldedSpelling(word)
+    guard folded != word,
+          folded.unicodeScalars.allSatisfy({ Lexicon.lexiconOrdinals.contains(Int($0.value)) }) else {
       return (nil, nil)
     }
-    
+
+    let res = getWord(folded, tag: token.tag, stress: stress, ctx: ctx)
+    if let phoneme = res.phoneme {
+      return (Lexicon.applyStress(appendCurrency(phoneme, currency: token.`_`.currency), stress: token.`_`.stress), res.rating)
+    }
     return (nil, nil)
   }
   

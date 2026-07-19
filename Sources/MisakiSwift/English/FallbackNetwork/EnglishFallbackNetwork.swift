@@ -64,7 +64,11 @@ final class EnglishFallbackNetwork {
   }
   
   func callAsFunction(_ word: MToken) -> (phoneme: String, rating: Int) {
-    let tokenIds = graphemesToTokens(word.text)
+    // The grapheme alphabet is ASCII-only, and every out-of-alphabet letter
+    // becomes the UNKNOWN token — the model then invents syllables around the
+    // hole (Nariño came back as "Neeraso"). Respell accented Latin input into
+    // the alphabet instead of letting it degrade.
+    let tokenIds = graphemesToTokens(AccentedLatin.fallbackRespelling(word.text))
     let inputIds = MLXArray(tokenIds).reshaped([1, tokenIds.count])
     let generatedIds = model.generate(inputIds: inputIds)
     let outputText = tokensToPhonemes(generatedIds.asArray(Int.self))
