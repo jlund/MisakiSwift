@@ -55,10 +55,12 @@ import Foundation
 }
 
 // A single-fragment cover means the word was a dictionary word all along —
-// never "segment" it (in practice transcribe() resolves it first).
+// never "segment" it (in practice transcribe() resolves it first). "gmail"
+// pins the fused-gold-entry interplay: its entry outranks the g+mail split.
 @Test func testWordSegmentation_RequiresMultipleFragments() async throws {
   let lexicon = Lexicon(british: false)
   #expect(lexicon.segmentation(of: "party") == nil)
+  #expect(lexicon.segmentation(of: "gmail") == nil)
 }
 
 // Fragments keep their gold stress; a leading letter name is demoted to
@@ -89,5 +91,16 @@ import Foundation
   let token = tokens.first { $0.text == "binaryteaparty" }
   #expect(token != nil)
   #expect(token?.phonemes?.contains(" ") == true)
+}
+
+// "gmail" rides its fused gold entry ("gee-mail" as one word), which beats
+// the g+mail segmentation; the capitalized prose form works via the
+// dictionary's automatic case variants.
+@Test func testWordSegmentationPhonemize_GmailGoldEntry() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "Check your gmail inbox today.")
+  #expect(result.contains("ʤˌimˈAl"))
+  let (capitalized, _) = englishG2P.phonemize(text: "Check your Gmail inbox today.")
+  #expect(capitalized.contains("ʤˌimˈAl"))
 }
 
