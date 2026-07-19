@@ -155,10 +155,11 @@ private func placeholder(_ text: String) -> String {
 
 // MARK: Queries, fragments, ports, and path budgets
 
-@Test func testWebAddress_QueryAndFragmentDropped() async throws {
-  #expect(natural("example.com/search?q=cats") == "example dot com slash search, and more")
-  #expect(natural("example.com/page#top") == "example dot com slash page, and more")
-  #expect(natural("google.com?q=x") == "google dot com, and more")
+// Queries and fragments are tracking noise: they drop with no spoken marker.
+@Test func testWebAddress_QueryAndFragmentSilentlyDropped() async throws {
+  #expect(natural("example.com/search?q=cats") == "example dot com slash search")
+  #expect(natural("example.com/page#top") == "example dot com slash page")
+  #expect(natural("google.com?q=x") == "google dot com")
 }
 
 @Test func testWebAddress_PortAndTrailingSlashDropped() async throws {
@@ -166,26 +167,31 @@ private func placeholder(_ text: String) -> String {
   #expect(natural("example.com/") == "example dot com")
 }
 
+// Tail truncation speaks its elision at the end of what was read.
 @Test func testWebAddress_LongPathsCapped() async throws {
   #expect(natural("tracker.example.com/campaign/a/b/c/d")
-    == "tracker dot example dot com slash campaign slash A slash B, and more")
+    == "tracker dot example dot com slash campaign slash A slash B slash ellipsis")
   #expect(natural("example.com/one-two-three-four-five-six/seven-eight-nine-ten-eleven-twelve-thirteen")
-    == "example dot com slash one two three four five six, and more")
+    == "example dot com slash one two three four five six slash ellipsis")
 }
 
-@Test func testWebAddress_UnspeakableSegmentBails() async throws {
+// An unspeakable hash/ID elides in place and reading continues past it.
+@Test func testWebAddress_UnspeakableSegmentsElideInPlace() async throws {
   #expect(natural("example.com/download/x7Kq9aZ3")
-    == "example dot com slash download, and more")
+    == "example dot com slash download slash ellipsis")
+  #expect(natural("example.com/download/x7Kq9aZ3/manual.pdf")
+    == "example dot com slash download slash ellipsis slash manual dot P.D.F")
 }
 
 // When a path exceeds the budget, digit-only segments (date scaffolding,
 // numeric IDs) are dropped first so the budget reaches the slug — the part a
-// listener actually wants.
+// listener actually wants — and the skip is spoken as "ellipsis" at the
+// point of elision, not as a trailing marker.
 @Test func testWebAddress_DigitSegmentsDroppedForSlug() async throws {
   #expect(natural("https://www.nytimes.com/2026/07/14/dining/restaurant-review-ambassadors-clubhouse-nyc.html")
-    == "nytimes dot com slash dining slash restaurant review ambassadors clubhouse N.Y.C dot H.T.M.L, and more")
+    == "nytimes dot com slash ellipsis slash dining slash restaurant review ambassadors clubhouse N.Y.C dot H.T.M.L")
   #expect(natural("blog.example.com/2026/07/14/my-first-post")
-    == "blog dot example dot com slash my first post, and more")
+    == "blog dot example dot com slash ellipsis slash my first post")
 }
 
 // Digit segments keep their place when the whole path fits the budget.
@@ -216,21 +222,24 @@ private func placeholder(_ text: String) -> String {
 
 // MARK: Markdown links
 
+// The anchor is what a narrator reads aloud: no URL, no "link" marker, no
+// boundary commas — it flows in its sentence as ordinary prose.
 @Test func testWebAddress_MarkdownLinkSpokenAsAnchor() async throws {
   #expect(natural("See [Read the study](https://www.nytimes.com/2026/health.html?x=1) when you can.")
-    == "See, Read the study, link, when you can.")
+    == "See Read the study when you can.")
+  #expect(natural("Try [Kagi Search](https://kagi.com) today.") == "Try Kagi Search today.")
 }
 
 @Test func testWebAddress_MarkdownBareDomainPayload() async throws {
-  #expect(natural("[docs](example.com)") == "docs, link")
+  #expect(natural("[docs](example.com)") == "docs")
 }
 
 @Test func testWebAddress_MarkdownEmailPayload() async throws {
-  #expect(natural("[mail me](josh@x.com)") == "mail me, link")
+  #expect(natural("[mail me](josh@x.com)") == "mail me")
 }
 
 @Test func testWebAddress_MarkdownAnchorIsAddress() async throws {
-  #expect(natural("[x.com](https://x.com)") == "X dot com, link")
+  #expect(natural("[x.com](https://x.com)") == "X dot com")
 }
 
 @Test func testWebAddress_MarkdownPlaceholderCollapses() async throws {
@@ -333,5 +342,14 @@ private func placeholder(_ text: String) -> String {
   let spoken = WebAddressExpansion.speakAddresses(in: "Forms live at irs.gov today.")
   let (result, _) = englishG2P.phonemize(text: spoken)
   #expect(result.contains("dˈɑt ɡˈʌv"))
+}
+
+// The elision marker itself must speak cleanly ("slash ellipsis slash").
+@Test func testWebAddressPhonemize_EllipsisMarker() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let spoken = WebAddressExpansion.speakAddresses(
+    in: "https://www.nytimes.com/2026/07/14/dining/review.html")
+  let (result, _) = englishG2P.phonemize(text: spoken)
+  #expect(result.contains("slˈæʃ əlˈɪpsɪs slˈæʃ"))
 }
 

@@ -17,10 +17,13 @@ public enum WebAddressExpansion {
   /// How a detected address is rendered.
   public enum Style: Sendable, Equatable {
     /// "google dot com slash search" — schemes, leading "www.", queries,
-    /// fragments, and ports dropped; pronounceable segments spoken as words,
-    /// the rest spelled; long or unspeakable paths capped with "and more".
+    /// fragments, and ports silently dropped; pronounceable segments spoken
+    /// as words, the rest spelled; skipped path content is marked with a
+    /// spoken "ellipsis" at the point of elision.
     case natural
-    /// Every detected address becomes the word "link".
+    /// Every detected address becomes the word "link". (Markdown links speak
+    /// their anchor text in both styles — the anchor is prose, not an
+    /// address.)
     case placeholder
   }
 
@@ -177,7 +180,13 @@ public enum WebAddressExpansion {
       }
       out += ns.substring(with: NSRange(location: cursor, length: range.location - cursor))
       let rendered = render(ns.substring(with: range), kind: detection.kind, style: style, in: ns)
-      append(rendered, to: &out, nextCharacter: firstCharacterOnLine(in: ns, after: range))
+      if case .markdownLink = detection.kind {
+        // The anchor is ordinary prose flowing in its sentence — no
+        // boundary commas.
+        out += rendered
+      } else {
+        append(rendered, to: &out, nextCharacter: firstCharacterOnLine(in: ns, after: range))
+      }
       cursor = range.location + range.length
     }
     out += ns.substring(from: cursor)
@@ -232,12 +241,11 @@ public enum WebAddressExpansion {
 
   private static func render(_ raw: String, kind: Kind, style: Style, in ns: NSString) -> String {
     if case .markdownLink(let anchorRange) = kind {
+      // The anchor is what a web page displays and what a narrator reads
+      // aloud; the URL payload is never spoken, and no "link" marker is
+      // appended (on-device it read as stilted, not informative).
       let anchor = ns.substring(with: anchorRange).trimmingCharacters(in: .whitespaces)
-      let spoken = expand(anchor, style: style, allowMarkdown: false)
-      // An anchor that is itself just an address collapses to one "link" in
-      // placeholder style instead of the stutter "link, link".
-      if style == .placeholder && spoken == "link" { return "link" }
-      return spoken + ", link"
+      return expand(anchor, style: style, allowMarkdown: false)
     }
     if style == .placeholder { return "link" }
     return naturalWords(for: parse(raw, kind: kind))
@@ -247,7 +255,6 @@ public enum WebAddressExpansion {
     var hostLabels: [String] = []
     var pathSegments: [String] = []
     var emailLocal: String?
-    var droppedContent = false
   }
 
   private static func parse(_ raw: String, kind: Kind) -> ParsedAddress {
@@ -259,13 +266,13 @@ public enum WebAddressExpansion {
       }
     }
 
+    // Fragments and queries drop silently — tracking noise carries no
+    // listener value, so marking its absence would itself be noise.
     var parsed = ParsedAddress()
     if let hash = rest.firstIndex(of: "#") {
-      if rest.index(after: hash) < rest.endIndex { parsed.droppedContent = true }
       rest = rest[..<hash]
     }
     if let query = rest.firstIndex(of: "?") {
-      if rest.index(after: query) < rest.endIndex { parsed.droppedContent = true }
       rest = rest[..<query]
     }
 
@@ -301,12 +308,15 @@ public enum WebAddressExpansion {
   }
 
   /// Path budget: at most this many segments, and at most this many spoken
-  /// words across them, before capping with "and more". Hosts always read in
-  /// full — they're the identity of the address. When a path exceeds the
-  /// budget, digit-only segments (date scaffolding, numeric IDs) are dropped
-  /// first: in "/2026/07/14/dining/restaurant-review-….html" the slug at the
-  /// end is the part a listener actually wants, and reading three date
-  /// segments would otherwise consume the whole budget before reaching it.
+  /// words across them. Hosts always read in full — they're the identity of
+  /// the address. When a path exceeds the budget, digit-only segments (date
+  /// scaffolding, numeric IDs) are dropped first: in
+  /// "/2026/07/14/dining/restaurant-review-….html" the slug at the end is
+  /// the part a listener actually wants, and reading three date segments
+  /// would otherwise consume the whole budget before reaching it. Every
+  /// skipped run of path content is spoken as one "ellipsis" at the point of
+  /// elision — never a trailing marker, which on-device read as "there is
+  /// more I didn't tell you" even when everything pertinent had been read.
   private static let maxPathSegments = 3
   private static let maxPathWords = 12
 
@@ -327,36 +337,49 @@ public enum WebAddressExpansion {
     }
     words.append(host.joined(separator: " dot "))
 
-    var segments = parsed.pathSegments
-    var droppedDigitSegments = false
-    if !fitsBudgets(segments) {
-      let filtered = segments.filter { !isDigitsOnly($0) }
-      droppedDigitSegments = filtered.count < segments.count
-      segments = filtered
-    }
-
+    let overBudget = !fitsBudgets(parsed.pathSegments)
     var emitted = 0
     var pathWords = 0
-    var truncated = false
-    for segment in segments {
-      guard emitted < maxPathSegments, let spoken = speakableSegment(segment) else {
-        truncated = true
-        break
+    var pendingElision = false
+    var capped = false
+    for segment in parsed.pathSegments {
+      if capped || (overBudget && isDigitsOnly(segment)) {
+        pendingElision = true
+        continue
+      }
+      guard emitted < maxPathSegments else {
+        capped = true
+        pendingElision = true
+        continue
+      }
+      guard let spoken = speakableSegment(segment) else {
+        // Unspeakable hash/ID: elide just this segment and keep reading —
+        // "/download/x7Kq9aZ3/manual.pdf" still reaches the manual.
+        pendingElision = true
+        continue
       }
       let count = spoken.split(separator: " ").count
       guard pathWords + count <= maxPathWords else {
-        truncated = true
-        break
+        capped = true
+        pendingElision = true
+        continue
+      }
+      if pendingElision {
+        words.append("slash")
+        words.append("ellipsis")
+        pendingElision = false
       }
       words.append("slash")
       words.append(spoken)
       emitted += 1
       pathWords += count
     }
+    if pendingElision {
+      words.append("slash")
+      words.append("ellipsis")
+    }
 
-    var result = words.filter { !$0.isEmpty }.joined(separator: " ")
-    if parsed.droppedContent || truncated || droppedDigitSegments { result += ", and more" }
-    return result
+    return words.filter { !$0.isEmpty }.joined(separator: " ")
   }
 
   /// Whether the whole path reads within the caps as-is (all segments
@@ -392,7 +415,7 @@ public enum WebAddressExpansion {
   /// "report.pdf" reads "report dot P.D.F". Returns nil when the segment is
   /// unspeakable — a hash/ID that would spell out at length (an alpha run of
   /// 5+ letters that isn't a word) or churn between letters and digits 4+
-  /// times ("x7Kq9aZ3") — so the caller can cap with "and more" instead.
+  /// times ("x7Kq9aZ3") — so the caller can elide it in place.
   private static func speakableSegment(_ segment: String) -> String? {
     var runs = 0
     for part in segment.split(separator: ".") {
