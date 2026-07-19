@@ -313,6 +313,129 @@ final class Lexicon {
     return (nil, nil)
   }
   
+  // MARK: - Word segmentation
+
+  /// Phonemes for a run-together word the dictionaries don't know but can
+  /// fully explain ("binaryteaparty" → "binary tea party"), or nil. Tried by
+  /// EnglishG2P before the fallback network; the token's surface text stays
+  /// untouched, so the chyron and transcript keep showing the original
+  /// concatenation while the segmented words are spoken.
+  func segmentedTranscription(_ token: MToken) -> (String?, Int?) {
+    segmentedPhonemes(of: token.`_`.alias ?? token.text)
+  }
+
+  /// Fragments keep their own gold stress (like currency's multi-word
+  /// phonemes); a single-letter fragment's letter name is demoted to
+  /// secondary stress so the following word carries the beat
+  /// ("gmail" → "ʤˌi mˈAl", "gee-MAIL").
+  func segmentedPhonemes(of word: String) -> (String?, Int?) {
+    guard let fragments = segmentation(of: word) else { return (nil, nil) }
+    var phonemes: [String] = []
+    for fragment in fragments {
+      if fragment.count == 1 {
+        guard let letter = golds[fragment.uppercased()] as? String else { return (nil, nil) }
+        phonemes.append(letter.replacingOccurrences(
+          of: String(Lexicon.primaryStress), with: String(Lexicon.secondaryStress)))
+      } else if let phoneme = goldPhoneme(fragment) {
+        phonemes.append(phoneme)
+      } else {
+        return (nil, nil)
+      }
+    }
+    return (phonemes.joined(separator: " "), 3)
+  }
+
+  /// The split itself, nil when the word shouldn't or can't be confidently
+  /// segmented. Gates: lowercase ASCII letters only (capitalized OOV words
+  /// are usually names, where the fallback network is the better guess) and
+  /// 4–24 characters (4 admits the letter+word brand class: "ebay", "xbox").
+  /// Coverage: gold fragments of ≥3 letters, plus at most one 1–2 letter
+  /// fragment at either edge (single letters spell — "gdrive" → g+drive;
+  /// two-letter fragments come from the curated
+  /// WebAddressExpansion.shortWords — "gopro" → go+pro). Scoring prefers
+  /// fewer, longer fragments ("stackoverflow" picks stack+overflow over
+  /// stack+over+flow), and a single-fragment cover is rejected (that word
+  /// would have hit the dictionary directly).
+  func segmentation(of word: String) -> [String]? {
+    guard word.count >= 4, word.count <= 24,
+          word == word.lowercased(),
+          word.allSatisfy({ $0.isLetter && $0.isASCII })
+    else { return nil }
+
+    let characters = Array(word)
+    var candidates: [(score: Int, fragments: [String])] = []
+
+    if let whole = coreCover(characters, from: 0, to: characters.count) {
+      candidates.append(whole)
+    }
+    for shortLength in 1...2 {
+      let leading = String(characters[0..<shortLength])
+      if isEdgeFragment(leading),
+         let rest = coreCover(characters, from: shortLength, to: characters.count) {
+        candidates.append((rest.score + shortLength * shortLength, [leading] + rest.fragments))
+      }
+      let trailing = String(characters[(characters.count - shortLength)...])
+      if isEdgeFragment(trailing),
+         let rest = coreCover(characters, from: 0, to: characters.count - shortLength) {
+        candidates.append((rest.score + shortLength * shortLength, rest.fragments + [trailing]))
+      }
+    }
+
+    guard let best = candidates.max(by: { $0.score < $1.score }),
+          best.fragments.count >= 2
+    else { return nil }
+    return best.fragments
+  }
+
+  /// Best covering of characters[from..<to] by gold fragments of ≥3 letters,
+  /// scored by the sum of squared fragment lengths.
+  private func coreCover(
+    _ characters: [Character], from: Int, to: Int
+  ) -> (score: Int, fragments: [String])? {
+    let length = to - from
+    guard length >= 3 else { return nil }
+    var best = [Int?](repeating: nil, count: length + 1)
+    var back = [Int](repeating: 0, count: length + 1)
+    best[0] = 0
+    for end in 3...length {
+      for start in stride(from: end - 3, through: 0, by: -1) {
+        guard let prefix = best[start] else { continue }
+        let fragment = String(characters[(from + start)..<(from + end)])
+        guard goldPhoneme(fragment) != nil else { continue }
+        let score = prefix + (end - start) * (end - start)
+        if best[end] == nil || score > best[end]! {
+          best[end] = score
+          back[end] = start
+        }
+      }
+    }
+    guard let total = best[length] else { return nil }
+    var fragments: [String] = []
+    var end = length
+    while end > 0 {
+      let start = back[end]
+      fragments.insert(String(characters[(from + start)..<(from + end)]), at: 0)
+      end = start
+    }
+    return (total, fragments)
+  }
+
+  /// A 1–2 letter fragment allowed at a word edge: any single letter (it
+  /// spells), or a curated two-letter word.
+  private func isEdgeFragment(_ fragment: String) -> Bool {
+    fragment.count == 1 || WebAddressExpansion.shortWords.contains(fragment)
+  }
+
+  /// A gold entry resolved to its DEFAULT phonemes (String entries as-is,
+  /// POS dictionaries via DEFAULT). Silver is deliberately excluded —
+  /// segmentation only asserts fragments the gold dictionary vouches for.
+  private func goldPhoneme(_ word: String) -> String? {
+    let value = golds[word]
+    if let phoneme = value as? String { return phoneme }
+    if let dict = value as? [String: String?] { return dict["DEFAULT"] ?? nil }
+    return nil
+  }
+
   private func isKnown(_ word: String) -> Bool {
     if golds[word] != nil || Lexicon.symbolSet[word] != nil || silvers[word] != nil { return true }
     

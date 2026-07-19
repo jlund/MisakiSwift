@@ -454,8 +454,10 @@ public enum WebAddressExpansion {
   /// Two-letter words common in addresses ("my-site", "contact-us") that
   /// would otherwise spell. Deliberately curated instead of dictionary-driven:
   /// the gold dictionaries know one- and two-letter strings ("x", "co") whose
-  /// address reading is still the spelled one.
-  private static let shortWords: Set<String> = [
+  /// address reading is still the spelled one. Also shared by
+  /// `Lexicon.segmentation(of:)` as the set of two-letter fragments allowed
+  /// at the edges of a run-together word ("gopro", "startup").
+  static let shortWords: Set<String> = [
     "am", "an", "as", "at", "be", "by", "do", "go", "he", "if", "in", "is",
     "it", "me", "my", "no", "of", "on", "or", "so", "to", "up", "us", "we",
   ]

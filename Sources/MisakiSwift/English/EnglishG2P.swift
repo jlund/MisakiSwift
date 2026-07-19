@@ -1109,6 +1109,17 @@ final public class EnglishG2P {
     }
   }
    
+  /// Out-of-vocabulary resolution: try dictionary-driven segmentation of
+  /// run-together words ("binaryteaparty" → spoken "binary tea party")
+  /// before surrendering to the fallback network's single-word guess. The
+  /// token's surface text is untouched either way, so the chyron and
+  /// transcript keep showing the original concatenation.
+  private func oovTranscription(_ token: MToken) -> (String?, Int?) {
+    let segmented = lexicon.segmentedTranscription(token)
+    if segmented.0 != nil { return segmented }
+    return fallback(token)
+  }
+
   // Turns the text into phonemes that can then be fed to text-to-speech (TTS) engine for converting to audio
   public func phonemize(text: String, performPreprocess: Bool = true) -> (String, [MToken]) {
     let pre: PreprocessTuple
@@ -1133,7 +1144,7 @@ final public class EnglishG2P {
         }
         
         if w.phonemes == nil {
-          let out = fallback(w)
+          let out = oovTranscription(w)
           w.phonemes = out.0
           w.`_`.rating = out.1
         }
@@ -1180,7 +1191,7 @@ final public class EnglishG2P {
         if shouldFallback {
           let token = mergeTokens(arr)
           let first = arr[0]
-          let out = fallback(token)
+          let out = oovTranscription(token)
           first.phonemes = out.0
           first.`_`.rating = out.1
           arr[0] = first
