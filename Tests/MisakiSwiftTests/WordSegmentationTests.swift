@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import NaturalLanguage
+import MLXUtilsLibrary
 @testable import MisakiSwift
 
 // MARK: - Dictionary-driven word segmentation (pure; CLI-safe)
@@ -56,11 +58,13 @@ import Foundation
 
 // A single-fragment cover means the word was a dictionary word all along —
 // never "segment" it (in practice transcribe() resolves it first). "gmail"
-// pins the fused-gold-entry interplay: its entry outranks the g+mail split.
+// and "georeference" pin the fused-gold-entry interplay: their entries
+// outrank the g+mail and geo+reference splits.
 @Test func testWordSegmentation_RequiresMultipleFragments() async throws {
   let lexicon = Lexicon(british: false)
   #expect(lexicon.segmentation(of: "party") == nil)
   #expect(lexicon.segmentation(of: "gmail") == nil)
+  #expect(lexicon.segmentation(of: "georeference") == nil)
 }
 
 // Fragments keep their gold stress; a leading letter name is demoted to
@@ -70,6 +74,38 @@ import Foundation
   #expect(lexicon.segmentedPhonemes(of: "binaryteaparty").0 == "bˈInəɹi tˈi pˈɑɹɾi")
   #expect(lexicon.segmentedPhonemes(of: "gdrive").0 == "ʤˌi dɹˈIv")
   #expect(lexicon.segmentedPhonemes(of: "misaki").0 == nil)
+}
+
+private func transcribeWord(_ text: String, british: Bool, tag: NLTag? = .noun) -> String? {
+  let lexicon = Lexicon(british: british)
+  let token = MToken(text: text, tokenRange: text.startIndex..<text.endIndex, tag: tag, whitespace: "")
+  return lexicon.transcribe(token, ctx: TokenContext()).0
+}
+
+// "georeference" (an alpha-tester report) was in no dictionary, and "geo"
+// wasn't a US word either, so the compound could neither resolve nor segment
+// and fell to the fallback network as one long garble. It now rides a fused
+// gold entry composed like its gold siblings geolocation/geospatial
+// (secondary-stressed geo prefix, primary stress on the head word), and the
+// stemmers pick up its inflections from the base entry.
+@Test func testWordSegmentation_GeoreferenceGoldEntry() async throws {
+  #expect(transcribeWord("georeference", british: false) == "ʤˌiOɹˈɛfəɹəns")
+  #expect(transcribeWord("georeference", british: true) == "ʤˌiːQɹˈɛfəɹəns")
+  #expect(transcribeWord("georeferences", british: false) == "ʤˌiOɹˈɛfəɹənsᵻz")
+  #expect(transcribeWord("georeferenced", british: false) == "ʤˌiOɹˈɛfəɹənst")
+  #expect(transcribeWord("georeferencing", british: false) == "ʤˌiOɹˈɛfəɹənsɪŋ")
+}
+
+// "geo" is now a US word in its own right (gb_gold already had it): it
+// appears standalone in prose, and it lets geo-compounds without their own
+// entries (georadar) degrade to a segmented "geo X" instead of fallback
+// garble — while compounds that do have entries (geofence) still resolve
+// whole via the single-fragment rule.
+@Test func testWordSegmentation_GeoUnlocksCompounds() async throws {
+  #expect(transcribeWord("geo", british: false) == "ʤˈiO")
+  let lexicon = Lexicon(british: false)
+  #expect(lexicon.segmentation(of: "georadar") == ["geo", "radar"])
+  #expect(lexicon.segmentation(of: "geofence") == nil)
 }
 
 // MARK: - Full-pipeline tests (Xcode/xcodebuild only — MLX metallib crashes
@@ -102,5 +138,16 @@ import Foundation
   #expect(result.contains("ʤˌimˈAl"))
   let (capitalized, _) = englishG2P.phonemize(text: "Check your Gmail inbox today.")
   #expect(capitalized.contains("ʤˌimˈAl"))
+}
+
+// "georeference" rides its fused gold entry like its gold siblings
+// geolocation and geospatial; inflected prose resolves through the stemmers
+// and the capitalized form through the automatic case variants.
+@Test func testWordSegmentationPhonemize_GeoreferenceGoldEntry() async throws {
+  let englishG2P = EnglishG2P(british: false)
+  let (result, _) = englishG2P.phonemize(text: "The map was georeferenced last week.")
+  #expect(result.contains("ʤˌiOɹˈɛfəɹənst"))
+  let (capitalized, _) = englishG2P.phonemize(text: "Georeference the scanned map first.")
+  #expect(capitalized.contains("ʤˌiOɹˈɛfəɹəns"))
 }
 
